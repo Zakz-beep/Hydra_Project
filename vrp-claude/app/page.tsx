@@ -27,6 +27,15 @@ import GreeksBacktestPanel from "./components/greeks/GreeksBacktestPanel";
 import GreeksSignalLogComponent from "./components/greeks/GreeksSignalLog";
 import GreeksChart from "./components/greeks/GreeksChart";
 
+// ── Risk Pipeline Imports ────────────────────────────────────
+import RiskDashboardLayout from "./components/risk/RiskDashboardLayout";
+
+// ── DCC Correlation Imports ──────────────────────────────────
+import DCCDashboard from "./components/dcc/DCCDashboard";
+
+// ── Volatility Engine Imports ─────────────────────────────────
+import VolatilityDashboard from "./components/volatility/VolatilityDashboard";
+
 
 const POLL_INTERVAL = 15_000; // 15 detik
 
@@ -40,8 +49,8 @@ export default function Dashboard() {
   const [countdown, setCountdown] = useState(POLL_INTERVAL / 1000);
   
   // ── Mode & Tab State ──────────────────────────────────────────
-  const [appMode, setAppMode] = useState<"vrp" | "greeks">("vrp");
-  const [tab, setTab] = useState<"overview" | "rv_engine" | "history" | "backtest" | "signals">("overview");
+  const [appMode, setAppMode] = useState<"vrp" | "greeks" | "risk" | "dcc" | "volatility">("vrp");
+  const [tab, setTab] = useState<"overview" | "rv_engine" | "history" | "backtest" | "signals" | "dashboard" | "metrics" | "stresstest" | "propfirm">("overview");
   
   // ── VRP Data State ────────────────────────────────────────────
   const [backtest,    setBacktest]    = useState<BacktestResult | null>(null);
@@ -56,10 +65,13 @@ export default function Dashboard() {
   const [greeksSignalLog, setGreeksSignalLog] = useState<GreeksSignalLogResponse | null>(null);
   const [greeksLoading, setGreeksLoading] = useState(false);
 
+  // ── Risk Pipeline State ───────────────────────────────────────
+  const [riskTicker, setRiskTicker]       = useState("NQ=F");
+
   const intervalRef   = useRef<ReturnType<typeof setInterval> | null>(null);
   const countdownRef  = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ── Fetch ──────────────────────────────────────────────────────
+  // ── Fetch (VRP/Greeks) ────────────────────────────────────────
   const fetchData = useCallback(async (t: string) => {
     setLoading(true);
     setError(null);
@@ -72,7 +84,7 @@ export default function Dashboard() {
          }
          const json: VRPResult = await res.json();
          setData(json);
-      } else {
+      } else if (appMode === "greeks") {
          const json = await fetchGreeks(t);
          setGreeksData(json);
       }
@@ -85,16 +97,17 @@ export default function Dashboard() {
     }
   }, [appMode]);
 
-  // ── Auto-refresh ───────────────────────────────────────────────
+  // ── Auto-refresh (VRP/Greeks only) ─────────────────────────────
   useEffect(() => {
+    if (appMode === "risk") return; // Risk mode uses its own polling
     fetchData(ticker);
-  }, [ticker, fetchData]);
+  }, [ticker, fetchData, appMode]);
 
   useEffect(() => {
     if (intervalRef.current)  clearInterval(intervalRef.current);
     if (countdownRef.current) clearInterval(countdownRef.current);
 
-    if (autoRefresh) {
+    if (autoRefresh && appMode !== "risk") {
       intervalRef.current = setInterval(() => fetchData(ticker), POLL_INTERVAL);
       countdownRef.current = setInterval(() =>
         setCountdown((c) => (c <= 1 ? POLL_INTERVAL / 1000 : c - 1)), 1000
@@ -104,7 +117,7 @@ export default function Dashboard() {
       if (intervalRef.current)  clearInterval(intervalRef.current);
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
-  }, [autoRefresh, ticker, fetchData]);
+  }, [autoRefresh, ticker, fetchData, appMode]);
 
   // Fetch extra data based on app mode and tab
   useEffect(() => {
@@ -114,11 +127,10 @@ export default function Dashboard() {
         Promise.all([
           fetchBacktest(ticker).then(setBacktest).catch(() => {}),
           fetchSignalLog(ticker, 50).then(setSignalLog).catch(() => {}),
-          fetchDBStats().then(setDBStats).catch(() => {}), // DB stats is global/VRP primarily
+          fetchDBStats().then(setDBStats).catch(() => {}),
         ]).finally(() => setBtLoading(false));
       }
-    } else {
-      // Greeks Mode Extra Fetching
+    } else if (appMode === "greeks") {
       if (tab === "history" || tab === "backtest" || tab === "signals") {
          setGreeksLoading(true);
          Promise.all([
@@ -129,6 +141,9 @@ export default function Dashboard() {
       }
     }
   }, [tab, ticker, appMode]);
+
+  // ── Risk Pipeline State Polling ──────────────────────────────────
+  // Removed legacy polling logic, now relying purely on interactive module 1-3 calls via the new UI component.
 
   const handleTickerChange = (t: string) => {
     setTicker(t);
@@ -146,6 +161,9 @@ export default function Dashboard() {
     if (signal.includes("LONG"))  return "red"   as const;
     return "neutral" as const;
   };
+
+  // ── Risk tab helpers ────────────────────────────────────────────
+  // Deprecated risk tabs
 
   return (
     <main className="min-h-screen bg-zinc-950 text-zinc-100 px-4 py-6 md:px-8">
@@ -169,45 +187,92 @@ export default function Dashboard() {
                  >
                    Greeks Inventory
                  </button>
+                 <button 
+                   onClick={() => { setAppMode("risk"); setTab("dashboard"); }}
+                   className={`px-3 py-1 text-[11px] uppercase transition-colors ${appMode === "risk" ? "bg-indigo-900/80 text-indigo-200 font-semibold shadow-sm border-l border-indigo-700/40" : "text-zinc-500 hover:text-zinc-300"}`}
+                 >
+                   Risk Pipeline
+                 </button>
+                 <button 
+                   onClick={() => { setAppMode("dcc"); setTab("overview"); }}
+                   className={`px-3 py-1 text-[11px] uppercase transition-colors ${appMode === "dcc" ? "bg-zinc-800 text-zinc-100 font-semibold shadow-sm border-l border-zinc-700/40" : "text-zinc-500 hover:text-zinc-300"}`}
+                 >
+                   Correlation
+                 </button>
+                 <button 
+                   onClick={() => { setAppMode("volatility"); setTab("overview"); }}
+                   className={`px-3 py-1 text-[11px] uppercase transition-colors ${appMode === "volatility" ? "bg-cyan-900/60 text-cyan-200 font-semibold shadow-sm border-l border-cyan-700/40" : "text-zinc-500 hover:text-zinc-300"}`}
+                 >
+                   Vol Engine
+                 </button>
               </div>
             </h1>
             <p className="text-[11px] font-mono text-zinc-600 mt-2">
                {appMode === "vrp" 
                  ? "Volatility Risk Premium · IV vs RV · HAR-RV · BSM Newton-Raphson"
-                 : "Options Market Structure · Gamma/Vanna/Charm Exposure · Dealer Regime"
+                 : appMode === "greeks"
+                 ? "Options Market Structure · Gamma/Vanna/Charm Exposure · Dealer Regime"
+                 : appMode === "risk"
+                 ? "Monte Carlo Simulation · GARCH + HMM Regime · VaR/CVaR · Prop Firm Challenge"
+                 : appMode === "volatility"
+                 ? "HAR-RV Forecast · HMM Market Regime · 4D Feature Space · Realized Volatility Engine"
+                 : "DCC-GARCH Dynamic Correlation · Systemic Risk Index"
                }
             </p>
           </div>
 
           {/* Controls */}
           <div className="flex items-center gap-3 text-[11px] font-mono text-zinc-500">
-            {lastFetch && (
-              <span>
-                {lastFetch.toLocaleTimeString()}
-                {autoRefresh && ` · ${countdown}s`}
-              </span>
+            {appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && (
+              <>
+                {lastFetch && (
+                  <span>
+                    {lastFetch.toLocaleTimeString()}
+                    {autoRefresh && ` · ${countdown}s`}
+                  </span>
+                )}
+                <button
+                  onClick={() => setAutoRefresh((a) => !a)}
+                  className={`px-2 py-0.5 rounded border text-[10px] cursor-pointer transition-colors
+                    ${autoRefresh
+                      ? "border-emerald-700 text-emerald-400 bg-emerald-950/30"
+                      : "border-zinc-700 text-zinc-500"}`}
+                >
+                  {autoRefresh ? "● AUTO" : "○ PAUSED"}
+                </button>
+                <button
+                  onClick={() => fetchData(ticker)}
+                  disabled={loading}
+                  className="px-2 py-0.5 rounded border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 cursor-pointer transition-colors"
+                >
+                  {loading ? "..." : "↺ Refresh"}
+                </button>
+              </>
             )}
-            <button
-              onClick={() => setAutoRefresh((a) => !a)}
-              className={`px-2 py-0.5 rounded border text-[10px] cursor-pointer transition-colors
-                ${autoRefresh
-                  ? "border-emerald-700 text-emerald-400 bg-emerald-950/30"
-                  : "border-zinc-700 text-zinc-500"}`}
-            >
-              {autoRefresh ? "● AUTO" : "○ PAUSED"}
-            </button>
-            <button
-              onClick={() => fetchData(ticker)}
-              disabled={loading}
-              className="px-2 py-0.5 rounded border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 cursor-pointer transition-colors"
-            >
-              {loading ? "..." : "↺ Refresh"}
-            </button>
           </div>
         </div>
 
-        {/* ── Ticker Input ───────────────────────────────────── */}
-        <TickerInput value={ticker} onChange={handleTickerChange} loading={loading} />
+        {/* ── Ticker Input (VRP/Greeks) ────────────────────────── */}
+        {appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && (
+          <TickerInput value={ticker} onChange={handleTickerChange} loading={loading} />
+        )}
+
+        {/* ── Risk Pipeline Controls ──────────────────────────── */}
+        {appMode === "risk" && (
+          <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/50 backdrop-blur-sm px-5 py-4 space-y-3">
+             <div className="flex items-center gap-2">
+                <label className="text-[10px] font-mono text-zinc-500 uppercase">Ticker</label>
+                <input
+                  type="text"
+                  value={riskTicker}
+                  onChange={(e) => setRiskTicker(e.target.value.toUpperCase())}
+                  className="bg-zinc-950 border border-zinc-700 rounded-md px-3 py-1.5 text-sm font-mono text-zinc-200 w-28
+                    focus:outline-none focus:border-indigo-500/60 transition-colors"
+                  placeholder="NQ=F"
+                />
+              </div>
+          </div>
+        )}
 
         {/* ── Error ─────────────────────────────────────────── */}
         {error && (
@@ -216,8 +281,8 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* ── Loading skeleton ───────────────────────────────── */}
-        {loading && (!data && !greeksData) && (
+        {/* ── Loading skeleton (VRP/Greeks) ─────────────────── */}
+        {loading && (!data && !greeksData) && appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {[...Array(8)].map((_, i) => (
               <div key={i} className="h-20 rounded-xl bg-zinc-800/40 animate-pulse" />
@@ -225,7 +290,13 @@ export default function Dashboard() {
           </div>
         )}
 
-        {(data || greeksData) && (
+        {/* ── Loading skeleton (Risk) ──────────────────────── */}
+        {/* Deprecated loading skeleton */}
+
+        {/* ═══════════════════════════════════════════════════════
+            VRP + GREEKS CONTENT (existing)
+           ═══════════════════════════════════════════════════════ */}
+        {(data || greeksData) && appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && (
           <>
             {/* ── Signal Hero (VRP Only) ─────────────────────────────────── */}
             {appMode === "vrp" && data && (
@@ -285,7 +356,7 @@ export default function Dashboard() {
                ).map((t) => (
                 <button
                   key={t}
-                  onClick={() => setTab(t as any)}
+                  onClick={() => setTab(t as typeof tab)}
                   className={`px-3 py-1.5 text-[11px] font-mono uppercase tracking-wider cursor-pointer
                     border-b-2 -mb-px transition-colors whitespace-nowrap
                     ${tab === t
@@ -541,10 +612,34 @@ export default function Dashboard() {
           </>
         )}
 
+        {/* ═══════════════════════════════════════════════════════
+            RISK PIPELINE CONTENT (new)
+           ═══════════════════════════════════════════════════════ */}
+        {appMode === "risk" && (
+           <RiskDashboardLayout ticker={riskTicker} />
+        )}
+
+        {/* ═══════════════════════════════════════════════════════
+            DCC CORRELATION CONTENT (new)
+           ═══════════════════════════════════════════════════════ */}
+        {appMode === "dcc" && (
+           <DCCDashboard />
+        )}
+
+        {/* ═══════════════════════════════════════════════════════
+            VOLATILITY ENGINE CONTENT (new)
+           ═══════════════════════════════════════════════════════ */}
+        {appMode === "volatility" && (
+           <VolatilityDashboard />
+        )}
+
         {/* ── Footer ─────────────────────────────────────────── */}
         <div className="text-center text-[10px] font-mono text-zinc-700 pt-4">
-          VRP Signal Engine v1.1 · FastAPI + Next.js ·{" "}
-          {autoRefresh ? `auto-refresh ${POLL_INTERVAL / 1000}s` : "manual mode"}
+          VRP Signal Engine v1.2 · FastAPI + Next.js ·{" "}
+          {appMode === "risk"
+            ? `risk gateway`
+            : autoRefresh ? `auto-refresh ${POLL_INTERVAL / 1000}s` : "manual mode"
+          }
         </div>
       </div>
     </main>

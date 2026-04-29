@@ -18,7 +18,7 @@ Endpoints:
   GET  /api/greeks/vanna-charm        → vanna & charm exposure detail
 
 Cara run:
-  uvicorn greeks_api:app --host 0.0.0.0 --port 8001 --reload
+ uvicorn greeks_api:app --host 0.0.0.0 --port 8001 --reload
 """
 
 import time
@@ -27,7 +27,7 @@ from typing import Optional
 
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-
+ 
 from Greeks import OptionsInventoryEngine
 from greeks_db import greeks_db
 

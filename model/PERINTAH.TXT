@@ -1,0 +1,3 @@
+
+hmm_volatality.py
+sok cek lagi atau ubah lagi kalau melenceng sesuai kehendak lu,kalau bisa coba gabungkan dengan har rv-example kedalam satu file baru
