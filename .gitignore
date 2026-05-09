@@ -45,10 +45,6 @@ yarn.lock
 ehthumbs.db
 Thumbs.db
 
-# Databases (SQLite)
-*.db
-*.sqlite
-*.sqlite3
 
 # API Keys & Secrets
 api.txt
@@ -57,7 +53,6 @@ python/api.txt
 *.key
 
 # AI Agent Workspace
-agents.md
 task.md
 implementation_plan.md
 walkthrough.md
