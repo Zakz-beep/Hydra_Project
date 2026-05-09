@@ -442,6 +442,53 @@ def update_config(new_config: Config):
 
 
 # ═══════════════════════════════════════════════
+# LEGA & TRUU / YIELD MODULE
+# ═══════════════════════════════════════════════
+
+def _get_legatruu_module():
+    import sys
+    if "legatruu" in sys.modules:
+        return sys.modules["legatruu"]
+    
+    import importlib.util
+    import os
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    legatruu_path = os.path.join(base_dir, "yield", "legatruu.py")
+    
+    if not os.path.exists(legatruu_path):
+        raise HTTPException(status_code=404, detail="legatruu.py module not found")
+        
+    spec = importlib.util.spec_from_file_location("legatruu", legatruu_path)
+    legatruu = importlib.util.module_from_spec(spec)
+    sys.modules["legatruu"] = legatruu
+    spec.loader.exec_module(legatruu)
+    return legatruu
+
+@app.get("/api/legatruu/snapshot")
+def get_legatruu_snapshot():
+    """Get the latest yield proxy snapshot and regime data"""
+    try:
+        import traceback
+        legatruu = _get_legatruu_module()
+        return legatruu.get_snapshot()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/legatruu/history")
+def get_legatruu_history(tail: int = Query(default=30, ge=1)):
+    """Get historical yield proxy data"""
+    try:
+        import traceback
+        legatruu = _get_legatruu_module()
+        return {"data": legatruu.get_history(tail=tail)}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ═══════════════════════════════════════════════
 # RUN
 # ═══════════════════════════════════════════════
 

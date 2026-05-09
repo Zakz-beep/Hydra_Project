@@ -1,0 +1,1 @@
+{"train_loss": 1.33661949634552, "val_loss": 1.515668511390686, "val_mse": 3.248905897140503, "val_rmse": 1.8024721626534217, "val_mae": 1.6934325695037842, "train_accuracy": 0.4508599638938904, "val_accuracy": 0.3987341821193695, "is_overfitting": false, "overfitting_status": "Good Fit"}

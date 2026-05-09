@@ -36,6 +36,11 @@ import DCCDashboard from "./components/dcc/DCCDashboard";
 // ── Volatility Engine Imports ─────────────────────────────────
 import VolatilityDashboard from "./components/volatility/VolatilityDashboard";
 
+// ── GRU Regime Imports ───────────────────────────────────
+import RegimeDashboard from "./components/regime/RegimeDashboard";
+
+// ── Lightweight Charts Imports ───────────────────────────────
+import LightweightChartDashboard from "./components/lwc/LightweightChartDashboard";
 
 const POLL_INTERVAL = 15_000; // 15 detik
 
@@ -49,7 +54,7 @@ export default function Dashboard() {
   const [countdown, setCountdown] = useState(POLL_INTERVAL / 1000);
   
   // ── Mode & Tab State ──────────────────────────────────────────
-  const [appMode, setAppMode] = useState<"vrp" | "greeks" | "risk" | "dcc" | "volatility">("vrp");
+  const [appMode, setAppMode] = useState<"vrp" | "greeks" | "risk" | "dcc" | "volatility" | "regime" | "lwc">("vrp");
   const [tab, setTab] = useState<"overview" | "rv_engine" | "history" | "backtest" | "signals" | "dashboard" | "metrics" | "stresstest" | "propfirm">("overview");
   
   // ── VRP Data State ────────────────────────────────────────────
@@ -99,7 +104,7 @@ export default function Dashboard() {
 
   // ── Auto-refresh (VRP/Greeks only) ─────────────────────────────
   useEffect(() => {
-    if (appMode === "risk") return; // Risk mode uses its own polling
+    if (appMode === "risk" || appMode === "regime" || appMode === "lwc") return;
     fetchData(ticker);
   }, [ticker, fetchData, appMode]);
 
@@ -107,7 +112,7 @@ export default function Dashboard() {
     if (intervalRef.current)  clearInterval(intervalRef.current);
     if (countdownRef.current) clearInterval(countdownRef.current);
 
-    if (autoRefresh && appMode !== "risk") {
+    if (autoRefresh && appMode !== "risk" && appMode !== "regime" && appMode !== "lwc") {
       intervalRef.current = setInterval(() => fetchData(ticker), POLL_INTERVAL);
       countdownRef.current = setInterval(() =>
         setCountdown((c) => (c <= 1 ? POLL_INTERVAL / 1000 : c - 1)), 1000
@@ -166,94 +171,102 @@ export default function Dashboard() {
   // Deprecated risk tabs
 
   return (
-    <main className="min-h-screen bg-zinc-950 text-zinc-100 px-4 py-6 md:px-8">
-      <div className="max-w-5xl mx-auto space-y-5">
+    <main className="min-h-screen bg-zinc-950 text-zinc-100 px-3 py-4 md:px-8 md:py-6">
+      <div className="max-w-6xl mx-auto space-y-4">
 
         {/* ── Header ─────────────────────────────────────────── */}
-        <div className="flex flex-col sm:flex-row sm:items-start gap-4 justify-between">
+        <div className="flex items-center justify-between gap-2">
           <div>
-            <h1 className="text-xl font-mono font-bold tracking-tight text-zinc-100 flex items-center gap-3">
-              Options Quant Dashboard
-              <div className="flex rounded-md bg-zinc-900 border border-zinc-700/60 p-0.5 mt-1 overflow-hidden">
-                 <button 
-                   onClick={() => { setAppMode("vrp"); setTab("overview"); }}
-                   className={`px-3 py-1 text-[11px] uppercase transition-colors ${appMode === "vrp" ? "bg-zinc-800 text-zinc-100 font-semibold shadow-sm" : "text-zinc-500 hover:text-zinc-300"}`}
-                 >
-                   VRP Engine
-                 </button>
-                 <button 
-                   onClick={() => { setAppMode("greeks"); setTab("overview"); }}
-                   className={`px-3 py-1 text-[11px] uppercase transition-colors ${appMode === "greeks" ? "bg-zinc-800 text-zinc-100 font-semibold shadow-sm" : "text-zinc-500 hover:text-zinc-300"}`}
-                 >
-                   Greeks Inventory
-                 </button>
-                 <button 
-                   onClick={() => { setAppMode("risk"); setTab("dashboard"); }}
-                   className={`px-3 py-1 text-[11px] uppercase transition-colors ${appMode === "risk" ? "bg-indigo-900/80 text-indigo-200 font-semibold shadow-sm border-l border-indigo-700/40" : "text-zinc-500 hover:text-zinc-300"}`}
-                 >
-                   Risk Pipeline
-                 </button>
-                 <button 
-                   onClick={() => { setAppMode("dcc"); setTab("overview"); }}
-                   className={`px-3 py-1 text-[11px] uppercase transition-colors ${appMode === "dcc" ? "bg-zinc-800 text-zinc-100 font-semibold shadow-sm border-l border-zinc-700/40" : "text-zinc-500 hover:text-zinc-300"}`}
-                 >
-                   Correlation
-                 </button>
-                 <button 
-                   onClick={() => { setAppMode("volatility"); setTab("overview"); }}
-                   className={`px-3 py-1 text-[11px] uppercase transition-colors ${appMode === "volatility" ? "bg-cyan-900/60 text-cyan-200 font-semibold shadow-sm border-l border-cyan-700/40" : "text-zinc-500 hover:text-zinc-300"}`}
-                 >
-                   Vol Engine
-                 </button>
-              </div>
+            <h1 className="text-base sm:text-xl font-mono font-bold tracking-tight text-zinc-100 leading-tight">
+              Options Quant
+              <span className="hidden sm:inline"> Dashboard</span>
             </h1>
-            <p className="text-[11px] font-mono text-zinc-600 mt-2">
+            <p className="text-[10px] font-mono text-zinc-600 mt-0.5 hidden sm:block">
                {appMode === "vrp" 
-                 ? "Volatility Risk Premium · IV vs RV · HAR-RV · BSM Newton-Raphson"
+                 ? "VRP · IV vs RV · HAR-RV · BSM"
                  : appMode === "greeks"
-                 ? "Options Market Structure · Gamma/Vanna/Charm Exposure · Dealer Regime"
+                 ? "Greeks · GEX · Vanna · Charm"
                  : appMode === "risk"
-                 ? "Monte Carlo Simulation · GARCH + HMM Regime · VaR/CVaR · Prop Firm Challenge"
+                 ? "Monte Carlo · GARCH · VaR/CVaR"
                  : appMode === "volatility"
-                 ? "HAR-RV Forecast · HMM Market Regime · 4D Feature Space · Realized Volatility Engine"
-                 : "DCC-GARCH Dynamic Correlation · Systemic Risk Index"
+                 ? "HAR-RV · HMM · Realized Vol"
+                 : appMode === "dcc"
+                 ? "DCC-GARCH · Systemic Risk"
+                 : appMode === "lwc"
+                 ? "Charts · Paper Trading · Macro"
+                 : "GRU Market Regime Detection"
                }
             </p>
           </div>
 
-          {/* Controls */}
-          <div className="flex items-center gap-3 text-[11px] font-mono text-zinc-500">
-            {appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && (
+          {/* Auto-refresh Controls (VRP/Greeks) */}
+          <div className="flex items-center gap-2 text-[11px] font-mono text-zinc-500 shrink-0">
+            {appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && appMode !== "regime" && appMode !== "lwc" && (
               <>
                 {lastFetch && (
-                  <span>
+                  <span className="hidden sm:inline">
                     {lastFetch.toLocaleTimeString()}
                     {autoRefresh && ` · ${countdown}s`}
                   </span>
                 )}
                 <button
                   onClick={() => setAutoRefresh((a) => !a)}
-                  className={`px-2 py-0.5 rounded border text-[10px] cursor-pointer transition-colors
+                  className={`px-2 py-1 rounded border text-[10px] cursor-pointer transition-colors
                     ${autoRefresh
                       ? "border-emerald-700 text-emerald-400 bg-emerald-950/30"
                       : "border-zinc-700 text-zinc-500"}`}
                 >
-                  {autoRefresh ? "● AUTO" : "○ PAUSED"}
+                  {autoRefresh ? "● AUTO" : "○"}
                 </button>
                 <button
                   onClick={() => fetchData(ticker)}
                   disabled={loading}
-                  className="px-2 py-0.5 rounded border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 cursor-pointer transition-colors"
+                  className="px-2 py-1 rounded border border-zinc-700 hover:border-zinc-500 disabled:opacity-40 cursor-pointer transition-colors"
                 >
-                  {loading ? "..." : "↺ Refresh"}
+                  {loading ? "..." : "↺"}
                 </button>
               </>
             )}
           </div>
         </div>
 
+        {/* ── Mode Navigation (Scrollable Pill Bar) ──────────── */}
+        <div className="-mx-3 md:mx-0 overflow-x-auto">
+          <div className="flex gap-1 px-3 md:px-0 pb-1 min-w-max">
+            {([
+              { mode: "vrp",        label: "VRP Engine",    accent: "zinc" },
+              { mode: "greeks",     label: "Greeks",         accent: "zinc" },
+              { mode: "risk",       label: "Risk Pipeline",  accent: "indigo" },
+              { mode: "dcc",        label: "Correlation",    accent: "zinc" },
+              { mode: "volatility", label: "Vol Engine",     accent: "cyan" },
+              { mode: "regime",     label: "GRU Regime",     accent: "violet" },
+              { mode: "lwc",        label: "LWC Chart",      accent: "emerald" },
+            ] as const).map(({ mode, label, accent }) => {
+              const isActive = appMode === mode;
+              const accentClasses: Record<string, string> = {
+                zinc:    isActive ? "bg-zinc-700 text-zinc-100 border-zinc-600"    : "border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700",
+                indigo:  isActive ? "bg-indigo-900/80 text-indigo-200 border-indigo-700" : "border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700",
+                cyan:    isActive ? "bg-cyan-900/60 text-cyan-200 border-cyan-700"  : "border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700",
+                violet:  isActive ? "bg-violet-900/60 text-violet-200 border-violet-700" : "border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700",
+                emerald: isActive ? "bg-emerald-900/60 text-emerald-200 border-emerald-700" : "border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700",
+              };
+              return (
+                <button
+                  key={mode}
+                  onClick={() => { setAppMode(mode); setTab(mode === "risk" ? "dashboard" : "overview"); }}
+                  className={`px-3 py-1.5 text-[11px] font-mono uppercase tracking-wider rounded-full border transition-all whitespace-nowrap ${
+                    accentClasses[accent]
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {/* ── Ticker Input (VRP/Greeks) ────────────────────────── */}
-        {appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && (
+        {appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && appMode !== "regime" && appMode !== "lwc" && (
           <TickerInput value={ticker} onChange={handleTickerChange} loading={loading} />
         )}
 
@@ -282,7 +295,7 @@ export default function Dashboard() {
         )}
 
         {/* ── Loading skeleton (VRP/Greeks) ─────────────────── */}
-        {loading && (!data && !greeksData) && appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && (
+        {loading && (!data && !greeksData) && appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && appMode !== "regime" && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {[...Array(8)].map((_, i) => (
               <div key={i} className="h-20 rounded-xl bg-zinc-800/40 animate-pulse" />
@@ -296,7 +309,7 @@ export default function Dashboard() {
         {/* ═══════════════════════════════════════════════════════
             VRP + GREEKS CONTENT (existing)
            ═══════════════════════════════════════════════════════ */}
-        {(data || greeksData) && appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && (
+        {(data || greeksData) && appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && appMode !== "regime" && (
           <>
             {/* ── Signal Hero (VRP Only) ─────────────────────────────────── */}
             {appMode === "vrp" && data && (
@@ -490,8 +503,8 @@ export default function Dashboard() {
 
                 {/* History table */}
                 {data.history.length > 0 && (
-                  <div className="rounded-xl border border-zinc-800/60 overflow-hidden">
-                    <table className="w-full text-[11px] font-mono">
+                  <div className="rounded-xl border border-zinc-800/60 overflow-hidden overflow-x-auto">
+                    <table className="w-full text-[11px] font-mono min-w-[400px]">
                       <thead>
                         <tr className="border-b border-zinc-800 bg-zinc-900/80">
                           {["Time", "IV", "RV", "VRP", "Signal"].map((h) => (
@@ -631,6 +644,25 @@ export default function Dashboard() {
            ═══════════════════════════════════════════════════════ */}
         {appMode === "volatility" && (
            <VolatilityDashboard />
+        )}
+
+        {/* ═══════════════════════════════════════════════════════
+            GRU REGIME CONTENT
+           ═══════════════════════════════════════════════════════ */}
+        {appMode === "regime" && (
+           <div className="space-y-6">
+             <RegimeDashboard />
+             
+           </div>
+        )}
+
+        {/* ═══════════════════════════════════════════════════════
+            LIGHTWEIGHT CHARTS CONTENT
+           ═══════════════════════════════════════════════════════ */}
+        {appMode === "lwc" && (
+           <div className="space-y-6">
+             <LightweightChartDashboard />
+           </div>
         )}
 
         {/* ── Footer ─────────────────────────────────────────── */}

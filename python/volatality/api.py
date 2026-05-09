@@ -1,14 +1,21 @@
 """
 api.py  —  Volatility Engine API
 =================================
-Endpoints for HAR-RV forecasting and HMM Market Regime Detection.
+Endpoints for HAR-RV forecasting, HMM Market Regime Detection,
+Markov-Switching AR (MSAR) analysis, HAR-CJ Volatility Forecasting,
+and Kalman HAR-RV-CJ adaptive volatility engine.
 Runs on port 8006.
 
 Available endpoints:
-  POST /api/vol/har          — standalone HAR-RV forecast (from synthetic or real RV)
-  POST /api/vol/hmm          — HMM regime detection (needs returns + avg_corr)
-  POST /api/vol/combined     — full pipeline: HAR-RV -> HMM (4-feature mode)
-  GET  /api/vol/health       — health check
+  POST /api/vol/har            — standalone HAR-RV forecast (from synthetic or real RV)
+  POST /api/vol/hmm            — HMM regime detection (needs returns + avg_corr)
+  POST /api/vol/combined       — full pipeline: HAR-RV -> HMM (4-feature mode)
+  POST /api/vol/msar           — full MSAR analysis (regime + sizing + VaR + forecast)
+  POST /api/vol/msar/forecast  — lightweight MSAR regime forecast only
+  POST /api/vol/har-cj         — HAR-CJ volatility decomposition + OLS forecast
+  POST /api/vol/har-kalman     -- Kalman HAR-RV-CJ with time-varying betas
+  POST /api/vol/hybrid-arbitrage -- Hybrid AI-Quant Volatility Arbitrage Engine
+  GET  /api/vol/health         -- health check
 """
 
 from fastapi import FastAPI, HTTPException
@@ -27,6 +34,16 @@ from hmm_har_volatility import (
     run_hmm_model,
     run_combined,
 )
+from msar import MSARModel, run_msar_model
+from har_cj_model import run_har_cj_model
+from har_kalman_model import run_kalman_har_cj
+
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from ml_models.hybrid_engine import HybridArbitrageEngine
+
+# Singleton engine (caches LSTM model in memory)
+_hybrid_engine = HybridArbitrageEngine()
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -64,6 +81,46 @@ class CombinedRequest(BaseModel):
     period: str = "2y"
     interval: str = "1d"
     use_har_in_hmm: bool = True
+
+
+class MSARRequest(BaseModel):
+    ticker: str
+    period: str = "2y"
+    interval: str = "1d"
+    k_regimes: int = 2
+    ar_order: int = 2
+    forecast_days: int = 10
+    var_confidence: list[float] = [0.95, 0.99]
+
+
+class MSARForecastRequest(BaseModel):
+    ticker: str
+    period: str = "2y"
+    interval: str = "1d"
+    k_regimes: int = 2
+    ar_order: int = 2
+    forecast_days: int = 10
+
+
+class HARCJRequest(BaseModel):
+    ticker: str = "SPY"
+    period: str = "2y"
+    include_cross_asset: bool = True
+    k_regimes: int = 2
+    ar_order: int = 2
+    forecast_days: int = 10
+
+
+class KalmanHARCJRequest(BaseModel):
+    ticker: str = "SPY"
+    period: str = "730d"        # needs long history for intraday decomposition
+    lookback: int = 120         # days shown in time-series output
+    obs_noise: float = 0.01
+    trans_noise: float = 1e-4
+
+
+class HybridArbRequest(BaseModel):
+    ticker: str = "SPY"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -266,7 +323,180 @@ async def combined_endpoint(req: CombinedRequest):
         raise HTTPException(status_code=500, detail=f"Combined pipeline error: {str(e)}")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── MSAR Endpoints ────────────────────────────────────────────────────────────
+
+@app.post("/api/vol/msar")
+async def msar_endpoint(req: MSARRequest):
+    """
+    Full MSAR analysis: MS(K)-AR(p) regime detection, position sizing,
+    VaR/CVaR, filtered probabilities, and multi-step forecast.
+    """
+    try:
+        close = _fetch_prices([req.ticker], req.period, req.interval)
+        if close.empty or req.ticker not in close.columns:
+            raise HTTPException(status_code=404, detail=f"No data for ticker: {req.ticker}")
+
+        # Build log-returns in percent
+        prices = close[req.ticker].dropna()
+        returns = np.log(prices / prices.shift(1)).dropna() * 100
+
+        if len(returns) < 50:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not enough data for MSAR (got {len(returns)}, need >= 50 bars).",
+            )
+
+        last_price = float(prices.iloc[-1])
+
+        result = run_msar_model(
+            returns=returns,
+            k_regimes=req.k_regimes,
+            ar_order=req.ar_order,
+            var_confidence=req.var_confidence,
+            forecast_days=req.forecast_days,
+            last_price=last_price,
+        )
+
+        return {
+            "status": "success",
+            "ticker": req.ticker,
+            "last_price": last_price,
+            **result,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"MSAR error: {str(e)}")
+
+
+@app.post("/api/vol/msar/forecast")
+async def msar_forecast_endpoint(req: MSARForecastRequest):
+    """
+    Lightweight MSAR endpoint — returns only regime forecast and price cone.
+    Faster than full /api/vol/msar because it skips detailed filtered probs.
+    """
+    try:
+        close = _fetch_prices([req.ticker], req.period, req.interval)
+        if close.empty or req.ticker not in close.columns:
+            raise HTTPException(status_code=404, detail=f"No data for ticker: {req.ticker}")
+
+        prices = close[req.ticker].dropna()
+        returns = np.log(prices / prices.shift(1)).dropna() * 100
+
+        if len(returns) < 50:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Not enough data for MSAR forecast (got {len(returns)}, need >= 50).",
+            )
+
+        last_price = float(prices.iloc[-1])
+
+        model = MSARModel(k_regimes=req.k_regimes, ar_order=req.ar_order)
+        fit_result = model.fit(returns)
+        forecast_result = model.forecast(n_days=req.forecast_days, last_price=last_price)
+
+        return {
+            "status": "success",
+            "ticker": req.ticker,
+            "last_price": last_price,
+            "current_regime": fit_result["current_regime"],
+            "forecast": forecast_result,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"MSAR forecast error: {str(e)}")
+
+
+# ── HAR-CJ Endpoint ───────────────────────────────────────────────────────────
+
+@app.post("/api/vol/har-cj")
+async def har_cj_endpoint(req: HARCJRequest):
+    """
+    HAR-CJ Volatility Forecasting.
+    Returns Garman-Klass RV decomposition (Jump + Continuous),
+    HAR-CJ OLS model coefficients, R², and next-day RV forecast.
+    Optionally includes cross-asset features (VIX, VRP, TLT, HYG, DXY).
+    """
+    try:
+        result = run_har_cj_model(
+            ticker=req.ticker,
+            period=req.period,
+            include_cross_asset=req.include_cross_asset,
+        )
+        return {
+            "status": "success",
+            "ticker": req.ticker,
+            **result,
+        }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"HAR-CJ error: {str(e)}")
+
+
+# ── Kalman HAR-CJ Endpoint ────────────────────────────────────────────────────
+
+@app.post("/api/vol/har-kalman")
+async def kalman_har_cj_endpoint(req: KalmanHARCJRequest):
+    """
+    Kalman HAR-RV-CJ Volatility Engine.
+    State-space model with time-varying betas that adaptively tracks
+    continuous vs jump volatility regimes.
+
+    Returns: forecast, metrics, vol time-series, dynamic betas, calibration table.
+    """
+    try:
+        result = run_kalman_har_cj(
+            ticker=req.ticker,
+            period=req.period,
+            lookback=req.lookback,
+            obs_noise=req.obs_noise,
+            trans_noise=req.trans_noise,
+        )
+        return {
+            "status": "success",
+            "ticker": req.ticker,
+            **result,
+        }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Kalman HAR-CJ error: {str(e)}")
+
+
+# -- Hybrid AI-Quant Volatility Arbitrage Endpoint --------------------------
+
+@app.post("/api/vol/hybrid-arbitrage")
+async def hybrid_arbitrage_endpoint(req: HybridArbRequest):
+    """
+    Hybrid AI-Quant Volatility Arbitrage Engine.
+    Combines LSTM volatility prediction with BSM pricing to find
+    mispriced options and calculate delta-neutral hedging actions.
+
+    Requires pre-trained LSTM model for the requested ticker.
+    Train first: uv run python -m ml_models.train_lstm --ticker <TICKER>
+    """
+    try:
+        result = _hybrid_engine.scan(ticker=req.ticker)
+        return result
+    except FileNotFoundError as fe:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model not trained for '{req.ticker}'. "
+                f"Run: uv run python -m ml_models.train_lstm --ticker {req.ticker}"
+            ),
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Hybrid Arb error: {str(e)}")
+
+
+# -- Entry point ------------------------------------------------------------────
 
 if __name__ == "__main__":
     print("Starting Volatility Engine API on port 8006...")

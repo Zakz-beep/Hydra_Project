@@ -44,3 +44,24 @@ yarn.lock
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Databases (SQLite)
+*.db
+*.sqlite
+*.sqlite3
+
+# API Keys & Secrets
+api.txt
+python/api.txt
+*.pem
+*.key
+
+# AI Agent Workspace
+agents.md
+task.md
+implementation_plan.md
+walkthrough.md
+scratch/
+
+# Next.js Build Cache
+vrp-claude/tsconfig.tsbuildinfo

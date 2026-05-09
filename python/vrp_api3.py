@@ -23,6 +23,8 @@ import pandas as pd
 from scipy.stats import norm
 import yfinance as yf
 import warnings
+import requests
+import os
 from datetime import datetime
 from typing import Optional, List
 from collections import deque
@@ -575,6 +577,319 @@ def cleanup_db(
     return {"status": "ok", "ticker": ticker, "kept_days": keep_days}
 
 
+@app.get("/api/tickers")
+def get_tickers():
+    """[NEW] Get list of mini tickers for MarketOverview widget."""
+    tickers = db.get_mini_tickers()
+    return {"tickers": tickers}
+
+class TickerItem(BaseModel):
+    symbol: str
+    name: str
+
+class TickersList(BaseModel):
+    tickers: List[TickerItem]
+
+@app.post("/api/tickers")
+def update_tickers(data: TickersList):
+    """[NEW] Update list of mini tickers for MarketOverview widget."""
+    db.save_mini_tickers([t.model_dump() for t in data.tickers])
+    return {"status": "ok"}
+
+
+# ═══════════════════════════════════════════════
+# FRED MACRO ENDPOINTS
+# ═══════════════════════════════════════════════
+
+def get_fred_api_key():
+    try:
+        with open("api.txt", "r") as f:
+            lines = f.readlines()
+            for line in lines:
+                line = line.strip()
+                if len(line) == 32 and line.islower() and line.isalnum():
+                    return line
+    except Exception:
+        pass
+    return "84c73e43c5492ddd3379cc77e29207c5"
+
+@app.get("/api/fred/yield-curve")
+def get_yield_curve():
+    """[NEW] Fetch Treasury Yield Spreads (10Y-2Y & 10Y-3M) from FRED API"""
+    api_key = get_fred_api_key()
+    base_url = "https://api.stlouisfed.org/fred/series/observations"
+    
+    # 1. Fetch 10Y-2Y
+    res_10y2y = requests.get(base_url, params={
+        "series_id": "T10Y2Y",
+        "api_key": api_key,
+        "file_type": "json",
+        "sort_order": "asc"
+    })
+    
+    # 2. Fetch 10Y-3M
+    res_10y3m = requests.get(base_url, params={
+        "series_id": "T10Y3M",
+        "api_key": api_key,
+        "file_type": "json",
+        "sort_order": "asc"
+    })
+    
+    if not res_10y2y.ok or not res_10y3m.ok:
+        raise HTTPException(status_code=500, detail="Failed to fetch data from FRED")
+        
+    data_10y2y = res_10y2y.json().get("observations", [])
+    data_10y3m = res_10y3m.json().get("observations", [])
+    
+    # Convert to dict mapped by date
+    merged = {}
+    
+    for obs in data_10y2y:
+        val = obs.get("value")
+        if val != ".":
+            merged[obs["date"]] = {"time": obs["date"], "T10Y2Y": float(val)}
+            
+    for obs in data_10y3m:
+        val = obs.get("value")
+        if val != "." and obs["date"] in merged:
+            merged[obs["date"]]["T10Y3M"] = float(val)
+        elif val != "." and obs["date"] not in merged:
+            merged[obs["date"]] = {"time": obs["date"], "T10Y3M": float(val)}
+            
+    # Convert to sorted list
+    sorted_dates = sorted(merged.keys())
+    final_data = []
+    
+    # Forward fill missing data
+    last_10y2y = 0.0
+    last_10y3m = 0.0
+    
+    for d in sorted_dates:
+        row = merged[d]
+        if "T10Y2Y" in row:
+            last_10y2y = row["T10Y2Y"]
+        if "T10Y3M" in row:
+            last_10y3m = row["T10Y3M"]
+            
+        final_data.append({
+            "time": row["time"],
+            "T10Y2Y": last_10y2y,
+            "T10Y3M": last_10y3m
+        })
+        
+    return {"data": final_data}
+
+
+@app.get("/api/fred/real-yield")
+def get_real_yield():
+    """[NEW] Fetch Real Yield (DFII10) and Term Premium (THREEFYTP10) from FRED API"""
+    api_key = get_fred_api_key()
+    base_url = "https://api.stlouisfed.org/fred/series/observations"
+    
+    # 1. Fetch DFII10 (Real Yield TIPS)
+    res_dfii10 = requests.get(base_url, params={
+        "series_id": "DFII10",
+        "api_key": api_key,
+        "file_type": "json",
+        "sort_order": "asc"
+    })
+    
+    # 2. Fetch THREEFYTP10 (Term Premium 10Y)
+    res_tp10 = requests.get(base_url, params={
+        "series_id": "THREEFYTP10",
+        "api_key": api_key,
+        "file_type": "json",
+        "sort_order": "asc"
+    })
+    
+    if not res_dfii10.ok or not res_tp10.ok:
+        raise HTTPException(status_code=500, detail="Failed to fetch real yield data from FRED")
+        
+    data_dfii10 = res_dfii10.json().get("observations", [])
+    data_tp10 = res_tp10.json().get("observations", [])
+    
+    # Convert to dict mapped by date
+    merged = {}
+    
+    for obs in data_dfii10:
+        val = obs.get("value")
+        if val != ".":
+            merged[obs["date"]] = {"time": obs["date"], "DFII10": float(val)}
+            
+    for obs in data_tp10:
+        val = obs.get("value")
+        if val != "." and obs["date"] in merged:
+            merged[obs["date"]]["THREEFYTP10"] = float(val)
+        elif val != "." and obs["date"] not in merged:
+            merged[obs["date"]] = {"time": obs["date"], "THREEFYTP10": float(val)}
+            
+    # Convert to sorted list
+    sorted_dates = sorted(merged.keys())
+    final_data = []
+    
+    # Forward fill missing data
+    last_dfii10 = 0.0
+    last_tp10 = 0.0
+    
+    for d in sorted_dates:
+        row = merged[d]
+        if "DFII10" in row:
+            last_dfii10 = row["DFII10"]
+        if "THREEFYTP10" in row:
+            last_tp10 = row["THREEFYTP10"]
+            
+        final_data.append({
+            "time": row["time"],
+            "DFII10": last_dfii10,
+            "THREEFYTP10": last_tp10
+        })
+        
+    return {"data": final_data}
+
+
+@app.get("/api/fred/net-liquidity")
+def get_net_liquidity():
+    """[NEW] Fetch Global Net Liquidity from FRED API (WALCL - WTREGEN - RRPONTSYD)"""
+    api_key = get_fred_api_key()
+    base_url = "https://api.stlouisfed.org/fred/series/observations"
+    
+    # 1. Fetch WALCL (Federal Reserve Total Assets) - Weekly, Millions of USD
+    res_walcl = requests.get(base_url, params={
+        "series_id": "WALCL",
+        "api_key": api_key,
+        "file_type": "json",
+        "sort_order": "asc"
+    })
+    
+    # 2. Fetch WTREGEN (Treasury General Account) - Weekly, Millions of USD
+    res_tga = requests.get(base_url, params={
+        "series_id": "WTREGEN",
+        "api_key": api_key,
+        "file_type": "json",
+        "sort_order": "asc"
+    })
+    
+    # 3. Fetch RRPONTSYD (Overnight Reverse Repurchase Agreements) - Daily, Billions of USD
+    res_rrp = requests.get(base_url, params={
+        "series_id": "RRPONTSYD",
+        "api_key": api_key,
+        "file_type": "json",
+        "sort_order": "asc"
+    })
+    
+    if not res_walcl.ok or not res_tga.ok or not res_rrp.ok:
+        raise HTTPException(status_code=500, detail="Failed to fetch net liquidity data from FRED")
+        
+    data_walcl = res_walcl.json().get("observations", [])
+    data_tga = res_tga.json().get("observations", [])
+    data_rrp = res_rrp.json().get("observations", [])
+    
+    merged = {}
+    
+    for obs in data_walcl:
+        val = obs.get("value")
+        if val != ".":
+            merged[obs["date"]] = {"time": obs["date"], "WALCL": float(val)}
+            
+    for obs in data_tga:
+        val = obs.get("value")
+        if val != ".":
+            if obs["date"] not in merged:
+                merged[obs["date"]] = {"time": obs["date"]}
+            merged[obs["date"]]["WTREGEN"] = float(val)
+            
+    for obs in data_rrp:
+        val = obs.get("value")
+        if val != ".":
+            if obs["date"] not in merged:
+                merged[obs["date"]] = {"time": obs["date"]}
+            merged[obs["date"]]["RRPONTSYD"] = float(val)
+            
+    # Convert to sorted list
+    sorted_dates = sorted(merged.keys())
+    final_data = []
+    
+    # Forward fill missing data
+    last_walcl = 0.0
+    last_tga = 0.0
+    last_rrp = 0.0
+    
+    for d in sorted_dates:
+        row = merged[d]
+        if "WALCL" in row:
+            last_walcl = row["WALCL"]
+        if "WTREGEN" in row:
+            last_tga = row["WTREGEN"]
+        if "RRPONTSYD" in row:
+            last_rrp = row["RRPONTSYD"]
+            
+        # Ensure we have some data before calculating
+        if last_walcl > 0:
+            # Net Liquidity = WALCL - WTREGEN - RRPONTSYD
+            # WALCL and WTREGEN are in Millions, RRPONTSYD is in Billions
+            # Convert all to Billions
+            walcl_b = last_walcl / 1000.0
+            tga_b = last_tga / 1000.0
+            rrp_b = last_rrp
+            
+            net_liquidity = walcl_b - tga_b - rrp_b
+            
+            final_data.append({
+                "time": row["time"],
+                "WALCL": walcl_b,
+                "WTREGEN": tga_b,
+                "RRPONTSYD": rrp_b,
+                "NetLiquidity": net_liquidity
+            })
+        
+    return {"data": final_data}
+# LEGA & TRUU / YIELD MODULE
+# ═══════════════════════════════════════════════
+
+def _get_legatruu_module():
+    import sys
+    if "legatruu" in sys.modules:
+        return sys.modules["legatruu"]
+    
+    import importlib.util
+    import os
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    legatruu_path = os.path.join(base_dir, "yield", "legatruu.py")
+    
+    if not os.path.exists(legatruu_path):
+        raise HTTPException(status_code=404, detail="legatruu.py module not found")
+        
+    spec = importlib.util.spec_from_file_location("legatruu", legatruu_path)
+    legatruu = importlib.util.module_from_spec(spec)
+    sys.modules["legatruu"] = legatruu
+    spec.loader.exec_module(legatruu)
+    return legatruu
+
+@app.get("/api/legatruu/snapshot")
+def get_legatruu_snapshot():
+    """Get the latest yield proxy snapshot and regime data"""
+    try:
+        import traceback
+        legatruu = _get_legatruu_module()
+        return legatruu.get_snapshot()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/legatruu/history")
+def get_legatruu_history(tail: int = Query(default=30, ge=1)):
+    """Get historical yield proxy data"""
+    try:
+        import traceback
+        legatruu = _get_legatruu_module()
+        return {"data": legatruu.get_history(tail=tail)}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ═══════════════════════════════════════════════
 # RUN
 # ═══════════════════════════════════════════════
@@ -582,3 +897,4 @@ def cleanup_db(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("vrp_api_patched:app", host="0.0.0.0", port=8000, reload=True)
+

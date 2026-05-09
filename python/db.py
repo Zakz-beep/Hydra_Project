@@ -161,6 +161,14 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     evaluated_at    TEXT,
     UNIQUE (signal_log_id, horizon_days)
 );
+
+-- ── 6. Mini Tickers ─────────────────────────────────────────
+-- Simpan daftar ticker untuk MarketOverview widget.
+CREATE TABLE IF NOT EXISTS mini_tickers (
+    symbol TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0
+);
 """
 
 
@@ -732,6 +740,39 @@ class VRPDatabase:
                 DELETE FROM rv_engine_snapshots
                 WHERE ticker = ? AND timestamp < ?
             """, (ticker, cutoff))
+
+    # ─────────────────────────────────────────────────
+    # FEATURE 4: Mini Tickers
+    # ─────────────────────────────────────────────────
+
+    def get_mini_tickers(self) -> list[dict]:
+        """Ambil daftar ticker untuk MarketOverview widget."""
+        with self._conn() as conn:
+            rows = conn.execute("SELECT symbol, name FROM mini_tickers ORDER BY sort_order ASC").fetchall()
+        
+        # Jika kosong, return default
+        if not rows:
+            return [
+                {'symbol': '^GSPC', 'name': 'S&P 500'},
+                {'symbol': 'QQQ', 'name': 'QQQ'},
+                {'symbol': '^DJI', 'name': 'Dow 30'},
+                {'symbol': '^IXIC', 'name': 'NASDAQ'},
+                {'symbol': 'BTC-USD', 'name': 'Bitcoin'},
+                {'symbol': 'ETH-USD', 'name': 'Ethereum'},
+                {'symbol': 'GC=F', 'name': 'Gold'},
+                {'symbol': 'CL=F', 'name': 'Crude Oil'},
+            ]
+        return [dict(r) for r in rows]
+
+    def save_mini_tickers(self, tickers: list[dict]):
+        """Simpan daftar ticker. Replace semua data yang ada."""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM mini_tickers")
+            for i, t in enumerate(tickers):
+                conn.execute(
+                    "INSERT INTO mini_tickers (symbol, name, sort_order) VALUES (?, ?, ?)",
+                    (t["symbol"], t.get("name", t["symbol"]), i)
+                )
 
 
 # ════════════════════════════════════════════════════════

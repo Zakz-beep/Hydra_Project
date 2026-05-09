@@ -7,6 +7,10 @@ const nextConfig = {
         destination: `${process.env.RISK_API_URL ?? "http://localhost:8002"}/api/risk/:path*`,
       },
       {
+        source: "/api/regime/:path*",
+        destination: `${process.env.REGIME_API_URL ?? "http://localhost:8007"}/api/regime/:path*`,
+      },
+      {
         source: "/api/:path*",
         destination: `${process.env.PYTHON_API_URL ?? "http://localhost:8000"}/api/:path*`,
       },

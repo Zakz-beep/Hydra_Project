@@ -1,0 +1,10 @@
+{
+  "ticker": "QQQ",
+  "trained_at": "2026-05-05T21:35:09.672954",
+  "n_samples": 2072,
+  "train_samples": 1657,
+  "test_samples": 415,
+  "epochs_run": 50,
+  "look_back": 22,
+  "forecast_tomorrow_vol_pct": 12.2639
+}

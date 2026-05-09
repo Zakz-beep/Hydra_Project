@@ -4,15 +4,22 @@ import React, { useState, useCallback, useEffect } from "react";
 import { fetchVolCombined, CombinedResult, STATE_COLORS, STATE_ICONS } from "../../lib/volatility";
 import HARChart from "./HARChart";
 import HMMRegimeChart from "./HMMRegimeChart";
+import MSARChart from "./MSARChart";
+import HARCJChart from "./HAR_CJChart";
+import KalmanHARCJChart from "./KalmanHARCJChart";
+import HybridArbChart from "./HybridArbChart";
 
-
-type TabId = "har" | "hmm" | "meta" | "monte_carlo";
+type TabId = "meta" | "har" | "hmm" | "msar" | "har_cj" | "kalman" | "monte_carlo" | "hybrid";
 
 const TABS: { id: TabId; label: string; icon: string; desc: string }[] = [
   { id: "meta",  label: "Overview",    icon: "⬡", desc: "Pipeline Meta & Key Signals" },
   { id: "har",   label: "HAR-RV",      icon: "📈", desc: "Heterogeneous Autoregressive Volatility" },
   { id: "hmm",   label: "HMM Regime",  icon: "🔴", desc: "Hidden Markov Market Regime Detection" },
+  { id: "msar",  label: "MSAR Logic",  icon: "🧬", desc: "Markov-Switching Autoregressive Risk" },
+  { id: "har_cj", label: "HAR-CJ",     icon: "📉", desc: "Jump-Continuous Volatility Decomposition" },
+  { id: "kalman", label: "Kalman",      icon: "🔬", desc: "Adaptive State-Space Volatility Engine" },
   { id: "monte_carlo", label: "Monte Carlo", icon: "🎲", desc: "Regime-Switching Simulation" },
+  { id: "hybrid", label: "Hybrid Arb", icon: "⚖️", desc: "Hybrid Arbitrage Strategy" },
 ];
 
 const PERIOD_OPTIONS = [
@@ -184,8 +191,8 @@ export default function VolatilityDashboard() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetchVolCombined([ticker], period, useHar);
-      setData(res);
+      const combinedRes = await fetchVolCombined([ticker], period, useHar);
+      setData(combinedRes);
       setActiveTab("meta");
     } catch (e: any) {
       setError(e.message ?? "Unknown error");
@@ -315,7 +322,10 @@ export default function VolatilityDashboard() {
           {activeTab === "meta" && <MetaPanel result={data} />}
           {activeTab === "har"  && <HARChart har={data.har_rv} ticker={data.rv_ticker} />}
           {activeTab === "hmm"  && <HMMRegimeChart hmm={data.hmm} />}
-         
+          {activeTab === "msar" && <MSARChart initialTicker={data.tickers[0] || tickersInput} />}
+          {activeTab === "har_cj" && <HARCJChart initialTicker={data.tickers[0] || tickersInput} />}
+          {activeTab === "kalman" && <KalmanHARCJChart initialTicker={data.tickers[0] || tickersInput} />}
+          {activeTab === "hybrid" && <HybridArbChart initialTicker={data.tickers[0] || tickersInput} />}
         </div>
       )}
 
