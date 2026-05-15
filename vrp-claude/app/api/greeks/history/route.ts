@@ -1,7 +1,9 @@
 // app/api/greeks/history/route.ts
 import { NextRequest, NextResponse } from "next/server";
 
-const GREEKS_API = process.env.GREEKS_API_URL ?? "http://localhost:8001";
+const BACKEND_IP = process.env.NEXT_PUBLIC_BACKEND_IP || "localhost";
+const BACKEND_PROTOCOL = process.env.NEXT_PUBLIC_BACKEND_PROTOCOL || "http";
+const GREEKS_API = `${BACKEND_PROTOCOL}://${BACKEND_IP}:8001`;
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);

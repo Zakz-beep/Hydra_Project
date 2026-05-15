@@ -83,7 +83,7 @@ export default function YieldSpreadChart() {
         const fetchData = async () => {
             setLoading(true);
             try {
-                const res = await fetch('http://localhost:8000/api/fred/yield-curve');
+                const res = await fetch('/api/fred/yield-curve');
                 if (!res.ok) throw new Error('Failed to fetch FRED data');
                 const json = await res.json();
                 

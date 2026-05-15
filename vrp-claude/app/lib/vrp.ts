@@ -230,7 +230,7 @@ export interface DBStats {
 // Fetch helpers
 // ─────────────────────────────────────────────────
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const BASE = "";
 
 export async function fetchVRP(ticker: string): Promise<VRPResult> {
   const res = await fetch(`${BASE}/api/vrp?ticker=${encodeURIComponent(ticker)}`, {

@@ -173,7 +173,7 @@ export interface MSARResult {
 
 // ── API Client ────────────────────────────────────────────────────────────────
 
-const BASE = "http://localhost:8006";
+const BASE = "";
 
 export async function fetchVolHAR(ticker: string, period = "2y"): Promise<{ status: string; ticker: string; har_rv: HARRVResult }> {
   const res = await fetch(`${BASE}/api/vol/har`, {

@@ -101,7 +101,7 @@ export default function MarketChart() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`http://localhost:8007/api/market/ohlcv?ticker=${targetTicker}`);
+      const res = await fetch(`/api/market/ohlcv?ticker=${targetTicker}`);
       if (!res.ok) {
         throw new Error(`Failed to fetch data for ${targetTicker}`);
       }

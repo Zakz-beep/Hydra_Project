@@ -4,7 +4,9 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
-const PYTHON_API = process.env.PYTHON_API_URL ?? "http://localhost:8000";
+const BACKEND_IP = process.env.NEXT_PUBLIC_BACKEND_IP || "localhost";
+const BACKEND_PROTOCOL = process.env.NEXT_PUBLIC_BACKEND_PROTOCOL || "http";
+const PYTHON_API = `${BACKEND_PROTOCOL}://${BACKEND_IP}:8000`;
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);

@@ -23,8 +23,8 @@ export default function GEXComponent({ ticker }: GEXComponentProps) {
             try {
                 // Fetch summary and top 0DTE strikes in parallel
                 const [resSummary, resStrikes] = await Promise.all([
-                    fetch(`http://localhost:8001/api/greeks/summary?ticker=${encodeURIComponent(ticker)}&force=true`),
-                    fetch(`http://localhost:8001/api/greeks/strikes?ticker=${encodeURIComponent(ticker)}&bucket=0&sort_by=gex_spotgamma&limit=5&force=true`)
+                    fetch(`/api/greeks/summary?ticker=${encodeURIComponent(ticker)}&force=true`),
+                    fetch(`/api/greeks/strikes?ticker=${encodeURIComponent(ticker)}&bucket=0&sort_by=gex_spotgamma&limit=5&force=true`)
                 ]);
                 
                 if (!resSummary.ok || !resStrikes.ok) throw new Error('Gagal mengambil data Greeks');

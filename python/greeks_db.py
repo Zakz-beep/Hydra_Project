@@ -244,6 +244,24 @@ class GreeksDatabase:
         else:
             with self._conn() as conn:
                 conn.executescript(SCHEMA)
+                
+                # Auto-migrate missing columns
+                try:
+                    cur = conn.cursor()
+                    # 1. greeks_snapshots
+                    cur.execute("PRAGMA table_info(greeks_snapshots)")
+                    columns = [row["name"] for row in cur.fetchall()]
+                    if "total_gross_gex" not in columns:
+                        conn.execute("ALTER TABLE greeks_snapshots ADD COLUMN total_gross_gex REAL NOT NULL DEFAULT 0;")
+                        
+                    # 2. greeks_expiry_inventory
+                    cur.execute("PRAGMA table_info(greeks_expiry_inventory)")
+                    columns_ei = [row["name"] for row in cur.fetchall()]
+                    for col in ["gross_gex", "gross_vanna", "gross_charm", "gross_vex"]:
+                        if col not in columns_ei:
+                            conn.execute(f"ALTER TABLE greeks_expiry_inventory ADD COLUMN {col} REAL NOT NULL DEFAULT 0;")
+                except Exception as e:
+                    print(f"Migration error: {e}")
 
     # ─────────────────────────────────────────────────
     # FEATURE 1: Persistent Snapshots

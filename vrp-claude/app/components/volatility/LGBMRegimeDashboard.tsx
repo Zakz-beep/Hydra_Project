@@ -286,7 +286,7 @@ export default function LGBMRegimeDashboard({ initialTicker }: { initialTicker?:
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("http://localhost:8006/api/vol/lgbm-regime", {
+      const res = await fetch("/api/vol/lgbm-regime", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ticker: ticker.trim().toUpperCase(), period }),

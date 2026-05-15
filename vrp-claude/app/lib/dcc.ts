@@ -116,7 +116,7 @@ export interface DCCRunRequest {
   mode: string;
 }
 
-const API_BASE = "http://localhost:8004/api/dcc";
+const API_BASE = "/api/dcc";
 
 export async function runDCCModel(req: DCCRunRequest): Promise<DCCRunResponse> {
   const res = await fetch(`${API_BASE}/run`, {

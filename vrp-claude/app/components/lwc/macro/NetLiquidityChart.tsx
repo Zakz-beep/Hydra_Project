@@ -28,7 +28,7 @@ export default function NetLiquidityChart() {
         const fetchData = async () => {
             setLoading(true);
             try {
-                const res = await fetch('http://localhost:8000/api/fred/net-liquidity');
+                const res = await fetch('/api/fred/net-liquidity');
                 if (!res.ok) throw new Error('Failed to fetch FRED data');
                 const json = await res.json();
                 
