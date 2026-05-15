@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { createChart, IChartApi, ISeriesApi } from "lightweight-charts";
+import { createChart, IChartApi, ISeriesApi, CandlestickSeries, HistogramSeries, ColorType } from "lightweight-charts";
 
 interface OHLCV {
   time: string;
@@ -28,7 +28,7 @@ export default function MarketChart() {
     // Initialize chart
     const chart = createChart(chartContainerRef.current, {
       layout: {
-        background: { type: 'solid', color: 'transparent' },
+        background: { type: ColorType.Solid, color: 'transparent' },
         textColor: '#A1A1AA', // zinc-400
       },
       grid: {
@@ -60,7 +60,7 @@ export default function MarketChart() {
     });
 
     // Create Candlestick series
-    const candlestickSeries = chart.addCandlestickSeries({
+    const candlestickSeries = chart.addSeries(CandlestickSeries, {
       upColor: '#34D399', // emerald-400
       downColor: '#F87171', // red-400
       borderVisible: false,
@@ -69,7 +69,7 @@ export default function MarketChart() {
     });
 
     // Create Volume series
-    const volumeSeries = chart.addCustomSeries({
+    const volumeSeries = chart.addSeries(HistogramSeries, {
       color: '#3F3F46', // zinc-700
       priceFormat: {
         type: 'volume',
@@ -109,13 +109,13 @@ export default function MarketChart() {
       
       // Update candlestick
       seriesRef.current.setData(
-        data.map(d => ({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close }))
+        data.map(d => ({ time: d.time as import("lightweight-charts").Time, open: d.open, high: d.high, low: d.low, close: d.close }))
       );
 
       // Update volume
       volumeSeriesRef.current.setData(
         data.map(d => ({
-          time: d.time,
+          time: d.time as import("lightweight-charts").Time,
           value: d.value,
           color: d.close > d.open ? 'rgba(52, 211, 153, 0.3)' : 'rgba(248, 113, 113, 0.3)'
         }))
