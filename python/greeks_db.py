@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS greeks_snapshots (
     total_net_charm REAL    NOT NULL DEFAULT 0,
     total_net_dai   REAL    NOT NULL DEFAULT 0,
     total_net_vex   REAL    NOT NULL DEFAULT 0,
+    total_gross_gex REAL    NOT NULL DEFAULT 0,
 
     -- GEX Regime
     gex_regime      TEXT    NOT NULL DEFAULT 'neutral',
@@ -265,9 +266,9 @@ class GreeksDatabase:
                 INSERT INTO greeks_snapshots
                     (timestamp, ticker, spot, data_source,
                      total_net_gex, total_net_vanna, total_net_charm,
-                     total_net_dai, total_net_vex,
+                     total_net_dai, total_net_vex, total_gross_gex,
                      gex_regime, gamma_flip, signals_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 result.get("timestamp", datetime.now().isoformat()),
                 result["ticker"],
@@ -278,6 +279,7 @@ class GreeksDatabase:
                 result.get("total_net_charm", 0),
                 result.get("total_net_dai", 0),
                 result.get("total_net_vex", 0),
+                result.get("total_gross_gex", 0),
                 result.get("gex_regime", "neutral"),
                 result.get("gamma_flip"),
                 json.dumps(result.get("signals", {})),
@@ -389,7 +391,7 @@ class GreeksDatabase:
             rows = conn.execute(f"""
                 SELECT timestamp, ticker, spot, data_source,
                        total_net_gex, total_net_vanna, total_net_charm,
-                       total_net_dai, total_net_vex,
+                       total_net_dai, total_net_vex, total_gross_gex,
                        gex_regime, gamma_flip, signals_json
                 FROM greeks_snapshots
                 WHERE {where}
@@ -471,7 +473,7 @@ class GreeksDatabase:
         """
         with self._conn() as conn:
             rows = conn.execute("""
-                SELECT timestamp, spot, total_net_gex, gex_regime, gamma_flip
+                SELECT timestamp, spot, total_net_gex, total_gross_gex, gex_regime, gamma_flip
                 FROM greeks_snapshots
                 WHERE ticker = ?
                 ORDER BY timestamp DESC
@@ -483,7 +485,7 @@ class GreeksDatabase:
             d = dict(r)
             try:
                 dt = datetime.fromisoformat(d["timestamp"])
-                d["time"] = dt.strftime("%H:%M:%S")
+                d["time"] = dt.strftime("%H:%M")
             except Exception:
                 d["time"] = d["timestamp"]
             result.append(d)

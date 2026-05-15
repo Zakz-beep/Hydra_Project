@@ -131,6 +131,8 @@ class InventorySnapshot:
     total_net_charm:  float
     total_net_dai:    float
     total_net_vex:    float
+    total_gross_gex:  float
+
 
     # GEX regime
     gex_regime:    str    # 'positive' (bullish suppression) / 'negative' (volatility amplifier)
@@ -828,6 +830,24 @@ def _generate_signals(
             signals["dte0_gex"]  = round(dte0.net_gex_spotgamma, 4)
             signals["dte0_desc"] = "GEX dari 0DTE options — dominan saat expiry harian (Tue/Thu/Fri untuk SPY)"
 
+    # ── DGCI (Dealer Gamma Condition Index) ──────────
+    total_oi = sum((getattr(v, "total_oi_calls", 0) + getattr(v, "total_oi_puts", 0)) for v in by_expiry.values())
+    if total_oi > 0 and gamma_flip:
+        # Distance component (-50 to +50)
+        dist_pct = (spot - gamma_flip) / spot * 100
+        dist_component = max(-50, min(50, dist_pct * 10))
+
+        # GEX / OI component (-50 to +50)
+        oi_millions = total_oi / 1_000_000
+        gex_ratio = total_gex / oi_millions if oi_millions > 0 else 0
+        gex_component = max(-50, min(50, gex_ratio * 50))
+
+        dgci = dist_component + gex_component
+        dgci = max(-100, min(100, dgci))
+
+        signals["dgci"] = round(dgci, 2)
+        signals["dgci_desc"] = f"DGCI Score: {round(dgci, 2)} ({round(gex_component, 1)} GEX/OI, {round(dist_component, 1)} Spot dist)"
+
     return signals
 
 
@@ -956,6 +976,7 @@ class OptionsInventoryEngine:
         total_charm = sum(v.net_charm          for v in by_expiry.values())
         total_dai   = sum(v.net_dai            for v in by_expiry.values())
         total_vex   = sum(v.net_vex            for v in by_expiry.values())
+        total_gross_gex = sum(v.gross_gex      for v in by_expiry.values())
 
         # Overall gamma flip dari semua strikes
         gamma_flip = _find_gamma_flip(all_strikes_data, spot)
@@ -983,6 +1004,7 @@ class OptionsInventoryEngine:
             total_net_charm=round(total_charm, 4),
             total_net_dai=round(total_dai,    4),
             total_net_vex=round(total_vex,    4),
+            total_gross_gex=round(total_gross_gex, 4),
             gex_regime=gex_regime,
             gamma_flip=gamma_flip,
             by_expiry=by_expiry,
@@ -1032,6 +1054,7 @@ class OptionsInventoryEngine:
             "total_net_charm":  snap.total_net_charm,
             "total_net_dai":    snap.total_net_dai,
             "total_net_vex":    snap.total_net_vex,
+            "total_gross_gex":  snap.total_gross_gex,
             "gex_regime":       snap.gex_regime,
             "gamma_flip":       snap.gamma_flip,
             "by_expiry":        by_expiry_dict,

@@ -40,7 +40,10 @@ import VolatilityDashboard from "./components/volatility/VolatilityDashboard";
 import RegimeDashboard from "./components/regime/RegimeDashboard";
 
 // ── Lightweight Charts Imports ───────────────────────────────
-import LightweightChartDashboard from "./components/lwc/LightweightChartDashboard";
+import LightweightChartDashboard from "./components/lwc/core/LightweightChartDashboard";
+
+// ── Dispersion Imports ────────────────────────────────────────
+import DispersionDashboard from "./components/dispersion/DispersionDashboard";
 
 const POLL_INTERVAL = 15_000; // 15 detik
 
@@ -54,7 +57,7 @@ export default function Dashboard() {
   const [countdown, setCountdown] = useState(POLL_INTERVAL / 1000);
   
   // ── Mode & Tab State ──────────────────────────────────────────
-  const [appMode, setAppMode] = useState<"vrp" | "greeks" | "risk" | "dcc" | "volatility" | "regime" | "lwc">("vrp");
+  const [appMode, setAppMode] = useState<"vrp" | "greeks" | "risk" | "dcc" | "volatility" | "regime" | "lwc" | "dispersion">("vrp");
   const [tab, setTab] = useState<"overview" | "rv_engine" | "history" | "backtest" | "signals" | "dashboard" | "metrics" | "stresstest" | "propfirm">("overview");
   
   // ── VRP Data State ────────────────────────────────────────────
@@ -104,7 +107,7 @@ export default function Dashboard() {
 
   // ── Auto-refresh (VRP/Greeks only) ─────────────────────────────
   useEffect(() => {
-    if (appMode === "risk" || appMode === "regime" || appMode === "lwc") return;
+    if (appMode === "risk" || appMode === "regime" || appMode === "lwc" || appMode === "dispersion") return;
     fetchData(ticker);
   }, [ticker, fetchData, appMode]);
 
@@ -112,7 +115,7 @@ export default function Dashboard() {
     if (intervalRef.current)  clearInterval(intervalRef.current);
     if (countdownRef.current) clearInterval(countdownRef.current);
 
-    if (autoRefresh && appMode !== "risk" && appMode !== "regime" && appMode !== "lwc") {
+    if (autoRefresh && appMode !== "risk" && appMode !== "regime" && appMode !== "lwc" && appMode !== "dispersion") {
       intervalRef.current = setInterval(() => fetchData(ticker), POLL_INTERVAL);
       countdownRef.current = setInterval(() =>
         setCountdown((c) => (c <= 1 ? POLL_INTERVAL / 1000 : c - 1)), 1000
@@ -152,9 +155,14 @@ export default function Dashboard() {
 
   const handleTickerChange = (t: string) => {
     setTicker(t);
+    // Clear ALL stale data immediately so old ticker's data never flashes
     setData(null);
     setBacktest(null);
     setSignalLog(null);
+    setGreeksData(null);
+    setGreeksHistory(null);
+    setGreeksBacktest(null);
+    setGreeksSignalLog(null);
   };
 
   const rv = data?.rv_engine;
@@ -234,13 +242,14 @@ export default function Dashboard() {
         <div className="-mx-3 md:mx-0 overflow-x-auto">
           <div className="flex gap-1 px-3 md:px-0 pb-1 min-w-max">
             {([
-              { mode: "vrp",        label: "VRP Engine",    accent: "zinc" },
-              { mode: "greeks",     label: "Greeks",         accent: "zinc" },
-              { mode: "risk",       label: "Risk Pipeline",  accent: "indigo" },
-              { mode: "dcc",        label: "Correlation",    accent: "zinc" },
-              { mode: "volatility", label: "Vol Engine",     accent: "cyan" },
-              { mode: "regime",     label: "GRU Regime",     accent: "violet" },
-              { mode: "lwc",        label: "LWC Chart",      accent: "emerald" },
+              { mode: "vrp",         label: "VRP Engine",    accent: "zinc" },
+              { mode: "greeks",      label: "Greeks",         accent: "zinc" },
+              { mode: "risk",        label: "Risk Pipeline",  accent: "indigo" },
+              { mode: "dcc",         label: "Correlation",    accent: "zinc" },
+              { mode: "volatility",  label: "Vol Engine",     accent: "cyan" },
+              { mode: "regime",      label: "GRU Regime",     accent: "violet" },
+              { mode: "lwc",         label: "LWC Chart",      accent: "emerald" },
+              { mode: "dispersion",  label: "Dispersion",     accent: "amber" },
             ] as const).map(({ mode, label, accent }) => {
               const isActive = appMode === mode;
               const accentClasses: Record<string, string> = {
@@ -249,6 +258,7 @@ export default function Dashboard() {
                 cyan:    isActive ? "bg-cyan-900/60 text-cyan-200 border-cyan-700"  : "border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700",
                 violet:  isActive ? "bg-violet-900/60 text-violet-200 border-violet-700" : "border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700",
                 emerald: isActive ? "bg-emerald-900/60 text-emerald-200 border-emerald-700" : "border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700",
+                amber:   isActive ? "bg-amber-900/60 text-amber-200 border-amber-700" : "border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700",
               };
               return (
                 <button
@@ -266,7 +276,7 @@ export default function Dashboard() {
         </div>
 
         {/* ── Ticker Input (VRP/Greeks) ────────────────────────── */}
-        {appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && appMode !== "regime" && appMode !== "lwc" && (
+        {appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && appMode !== "regime" && appMode !== "lwc" && appMode !== "dispersion" && (
           <TickerInput value={ticker} onChange={handleTickerChange} loading={loading} />
         )}
 
@@ -295,7 +305,7 @@ export default function Dashboard() {
         )}
 
         {/* ── Loading skeleton (VRP/Greeks) ─────────────────── */}
-        {loading && (!data && !greeksData) && appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && appMode !== "regime" && (
+        {loading && (!data && !greeksData) && appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && appMode !== "regime" && appMode !== "dispersion" && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {[...Array(8)].map((_, i) => (
               <div key={i} className="h-20 rounded-xl bg-zinc-800/40 animate-pulse" />
@@ -309,7 +319,7 @@ export default function Dashboard() {
         {/* ═══════════════════════════════════════════════════════
             VRP + GREEKS CONTENT (existing)
            ═══════════════════════════════════════════════════════ */}
-        {(data || greeksData) && appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && appMode !== "regime" && (
+        {(data || greeksData) && appMode !== "risk" && appMode !== "dcc" && appMode !== "volatility" && appMode !== "regime" && appMode !== "dispersion" && (
           <>
             {/* ── Signal Hero (VRP Only) ─────────────────────────────────── */}
             {appMode === "vrp" && data && (
@@ -592,7 +602,7 @@ export default function Dashboard() {
           {/* ── Mode: Greeks ───────────────────────────────── */}
           {appMode === "greeks" && greeksData && (
              <>
-                {tab === "overview" && <GreeksOverview data={greeksData} />}
+                {tab === "overview" && <GreeksOverview data={greeksData} ticker={ticker} />}
                 
                 {tab === "history" && (
                    <div className="space-y-4">
@@ -663,6 +673,13 @@ export default function Dashboard() {
            <div className="space-y-6">
              <LightweightChartDashboard />
            </div>
+        )}
+
+        {/* ═══════════════════════════════════════════════════════
+            DISPERSION TRADING CONTENT
+           ═══════════════════════════════════════════════════════ */}
+        {appMode === "dispersion" && (
+           <DispersionDashboard />
         )}
 
         {/* ── Footer ─────────────────────────────────────────── */}

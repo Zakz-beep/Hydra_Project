@@ -169,6 +169,40 @@ CREATE TABLE IF NOT EXISTS mini_tickers (
     name TEXT NOT NULL,
     sort_order INTEGER DEFAULT 0
 );
+-- ── 7. Paper Trading ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS paper_balance (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    balance REAL NOT NULL DEFAULT 10000.0,
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS paper_positions (
+    id TEXT PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    tp_price REAL,
+    sl_price REAL,
+    margin REAL NOT NULL,
+    leverage INTEGER NOT NULL,
+    qty REAL NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS paper_history (
+    id TEXT PRIMARY KEY,
+    ticker TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    close_price REAL NOT NULL,
+    close_reason TEXT NOT NULL,
+    pnl REAL NOT NULL,
+    margin REAL NOT NULL,
+    leverage INTEGER NOT NULL,
+    qty REAL NOT NULL,
+    opened_at TEXT NOT NULL,
+    closed_at TEXT NOT NULL
+);
 """
 
 
@@ -774,6 +808,63 @@ class VRPDatabase:
                     (t["symbol"], t.get("name", t["symbol"]), i)
                 )
 
+    # ── 7. Paper Trading ───────────────────────────────────────────────
+
+    def get_paper_balance(self) -> float:
+        query = "SELECT balance FROM paper_balance WHERE id = 1"
+        with self._conn() as conn:
+            row = conn.execute(query).fetchone()
+            if row:
+                return row["balance"]
+            else:
+                conn.execute("INSERT INTO paper_balance (id, balance, updated_at) VALUES (1, 10000.0, ?)", (datetime.now().isoformat(),))
+                return 10000.0
+
+    def update_paper_balance(self, new_balance: float):
+        query = "UPDATE paper_balance SET balance = ?, updated_at = ? WHERE id = 1"
+        with self._conn() as conn:
+            conn.execute(query, (new_balance, datetime.now().isoformat()))
+
+    def get_paper_positions(self) -> list:
+        query = "SELECT * FROM paper_positions ORDER BY created_at DESC"
+        with self._conn() as conn:
+            return [dict(r) for r in conn.execute(query).fetchall()]
+
+    def save_paper_position(self, pos: dict):
+        query = """
+        INSERT OR REPLACE INTO paper_positions 
+        (id, ticker, mode, entry_price, tp_price, sl_price, margin, leverage, qty, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        with self._conn() as conn:
+            conn.execute(query, (
+                pos['id'], pos['ticker'], pos['mode'], pos['entry_price'], 
+                pos.get('tp_price'), pos.get('sl_price'), pos['margin'], 
+                pos['leverage'], pos['qty'], pos.get('created_at', datetime.now().isoformat())
+            ))
+
+    def delete_paper_position(self, pos_id: str):
+        with self._conn() as conn:
+            conn.execute("DELETE FROM paper_positions WHERE id = ?", (pos_id,))
+
+    def get_paper_history(self, limit=50) -> list:
+        query = "SELECT * FROM paper_history ORDER BY closed_at DESC LIMIT ?"
+        with self._conn() as conn:
+            return [dict(r) for r in conn.execute(query, (limit,)).fetchall()]
+
+    def save_paper_history(self, history: dict):
+        query = """
+        INSERT INTO paper_history
+        (id, ticker, mode, entry_price, close_price, close_reason, pnl, margin, leverage, qty, opened_at, closed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        with self._conn() as conn:
+            conn.execute(query, (
+                history['id'], history['ticker'], history['mode'], history['entry_price'],
+                history['close_price'], history['close_reason'], history['pnl'],
+                history['margin'], history['leverage'], history['qty'],
+                history['opened_at'], history.get('closed_at', datetime.now().isoformat())
+            ))
 
 # ════════════════════════════════════════════════════════
 # MODULE-LEVEL SINGLETON

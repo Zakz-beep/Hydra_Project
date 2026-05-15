@@ -3,10 +3,10 @@
 
 import { useMemo, useState } from "react";
 import {
-  BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip,
+  ComposedChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip,
   CartesianGrid, ResponsiveContainer, ReferenceLine, Legend, ScatterChart, Scatter, ZAxis
 } from "recharts";
-import { GreeksSnapshot, StrikeGreeks } from "../../lib/greeks";
+import { GreeksSnapshot, StrikeGreeks, fmtGex } from "../../lib/greeks";
 
 interface GreeksSurfacesProps {
   data: GreeksSnapshot;
@@ -25,17 +25,53 @@ const CustomTooltip = ({ active, payload, label }: any) => {
           </span>
         </div>
       ))}
+      {payload[0]?.payload?.call_oi !== undefined && (
+        <>
+          <div className="flex gap-4 justify-between mt-2 pt-2 border-t border-zinc-700/50">
+            <span className="text-zinc-500">Call OI</span>
+            <span className="text-zinc-300">{payload[0].payload.call_oi.toLocaleString()}</span>
+          </div>
+          <div className="flex gap-4 justify-between">
+            <span className="text-zinc-500">Put OI</span>
+            <span className="text-zinc-300">{payload[0].payload.put_oi.toLocaleString()}</span>
+          </div>
+          <div className="flex gap-4 justify-between mt-2 pt-2 border-t border-zinc-700/50">
+            <span className="text-zinc-500">Vanna Exp</span>
+            <span className={(payload[0].payload.vanna || 0) >= 0 ? "text-emerald-400" : "text-red-400"}>
+              {fmtGex(payload[0].payload.vanna || 0)}
+            </span>
+          </div>
+          <div className="flex gap-4 justify-between">
+            <span className="text-zinc-500">Charm Exp</span>
+            <span className={(payload[0].payload.charm || 0) >= 0 ? "text-emerald-400" : "text-red-400"}>
+              {fmtGex(payload[0].payload.charm || 0)}
+            </span>
+          </div>
+        </>
+      )}
     </div>
+  );
+};
+
+const CustomReferenceLabel = ({ viewBox, value, fill, position = "top" }: any) => {
+  const { x, y, width, height } = viewBox;
+  const isTop = position === "top";
+  const rectY = isTop ? y + 15 : y + height - 25;
+  return (
+    <g>
+      <rect x={x - 45} y={rectY - 12} width={90} height={18} fill={fill} rx={4} />
+      <text x={x} y={rectY} fill="#fff" fontSize={10} fontFamily="monospace" textAnchor="middle">{value}</text>
+    </g>
   );
 };
 
 export default function GreeksSurfaces({ data }: GreeksSurfacesProps) {
   const [activeDte, setActiveDte] = useState<string>("all");
 
-  const { gexProfile, volSurface, netGexTot, posGexTot, negGexTot } = useMemo(() => {
-    if (!data.by_expiry) return { gexProfile: [], volSurface: [], netGexTot: 0, posGexTot: 0, negGexTot: 0 };
+  const { gexProfile, volSurface, netGexTot, posGexTot, negGexTot, callWallStrike, putWallStrike, overallMaxPain } = useMemo(() => {
+    if (!data.by_expiry) return { gexProfile: [], volSurface: [], netGexTot: 0, posGexTot: 0, negGexTot: 0, callWallStrike: 0, putWallStrike: 0, overallMaxPain: null };
 
-    const strikeGexMap = new Map<number, { strike: number, call_gex: number, put_gex: number }>();
+    const strikeGexMap = new Map<number, { strike: number, call_gex: number, put_gex: number, total_oi: number, call_oi: number, put_oi: number, vanna: number, charm: number }>();
     const volMap = new Map<number, any>();
 
     let posGex = 0;
@@ -49,27 +85,24 @@ export default function GreeksSurfaces({ data }: GreeksSurfacesProps) {
          bucket.strikes.forEach((s) => {
            // GEX AGGREGATION
            if (!strikeGexMap.has(s.strike)) {
-             strikeGexMap.set(s.strike, { strike: s.strike, call_gex: 0, put_gex: 0 });
+             strikeGexMap.set(s.strike, { strike: s.strike, call_gex: 0, put_gex: 0, total_oi: 0, call_oi: 0, put_oi: 0, vanna: 0, charm: 0 });
            }
            const st = strikeGexMap.get(s.strike)!;
+           st.total_oi += (s.oi || 0);
+           st.vanna += (s.vanna_exp || 0);
+           st.charm += (s.charm_exp || 0);
            
-           // We assume gex_spotgamma is absolute or directional.
-           // Commonly dealer is short calls (negative gamma) and long puts (positive gamma) 
-           // Or standard assumption: calls provide positive GEX, puts provide negative GEX
-           // We will just sum up what they are, or force signs. 
-           // Usually Calls = positive GEX, Puts = negative GEX.
            let val = s.gex_spotgamma;
            if (s.option_type === "call") {
-             // force positive for visualization if needed, but let's trust the engine's sign. 
-             // IF the engine uses negative for puts and calls, we sort by absolute.
-             // Actually, SpotGamma assumes calls are long (+GEX), puts are short (-GEX).
              val = Math.abs(val);
              st.call_gex += val;
              posGex += val;
+             st.call_oi += s.oi || 0;
            } else {
              val = -Math.abs(val);
              st.put_gex += val;
              negGex += val;
+             st.put_oi += s.oi || 0;
            }
 
            // VOL SURFACE AGGREGATION
@@ -77,9 +110,7 @@ export default function GreeksSurfaces({ data }: GreeksSurfacesProps) {
              volMap.set(s.strike, { strike: s.strike });
            }
            const vs = volMap.get(s.strike)!;
-           // We store IV for each bucket (e.g. `iv_0`, `iv_1`)
-           if (s.oi > 10) { // filter out zero OI noise
-              // average IV by bucket if multiple expiries exist in the bucket
+           if (s.oi > 10) { 
               if (!vs[`iv_${bucketKey}`]) vs[`iv_${bucketKey}`] = s.iv * 100;
               else vs[`iv_${bucketKey}`] = (vs[`iv_${bucketKey}`] + s.iv * 100) / 2;
            }
@@ -88,23 +119,57 @@ export default function GreeksSurfaces({ data }: GreeksSurfacesProps) {
     });
 
     const gexArr = Array.from(strikeGexMap.values())
-      .map(v => ({ ...v, net_gex: v.call_gex + v.put_gex }))
-      .sort((a, b) => a.strike - b.strike); // Order by strike Asc
+      .map(v => ({ 
+         ...v, 
+         net_gex: v.call_gex + v.put_gex,
+         abs_gex: Math.abs(v.call_gex) + Math.abs(v.put_gex)
+      }))
+      .sort((a, b) => a.strike - b.strike);
       
-    // Filter strike range to S +/- 15% for readability
-    const spot = data.spot;
-    const gexFiltered = gexArr.filter(x => x.strike >= spot * 0.85 && x.strike <= spot * 1.15);
+    let callWallStrike = 0;
+    let putWallStrike = 0;
+    let maxCallGex = 0;
+    let maxPutGex = 0; // Since put_gex is negative, we want the lowest value
+
+    gexArr.forEach(v => {
+      if (v.call_gex > maxCallGex) {
+        maxCallGex = v.call_gex;
+        callWallStrike = v.strike;
+      }
+      if (v.put_gex < maxPutGex) {
+        maxPutGex = v.put_gex;
+        putWallStrike = v.strike;
+      }
+    });
+
+    const spot = data.spot || 0;
+    const gexFiltered = spot > 0 ? gexArr.filter(x => x.strike >= spot * 0.85 && x.strike <= spot * 1.15) : gexArr;
     
     const volArr = Array.from(volMap.values())
-      .sort((a,b) => a.strike - b.strike)
-      .filter(x => x.strike >= spot * 0.85 && x.strike <= spot * 1.15);
+      .sort((a,b) => a.strike - b.strike);
+    
+    const volFiltered = spot > 0 ? volArr.filter(x => x.strike >= spot * 0.85 && x.strike <= spot * 1.15) : volArr;
+
+    let overallMaxPain: number | null = null;
+    if (activeDte !== "all" && data.by_expiry[activeDte]) {
+      overallMaxPain = data.by_expiry[activeDte].max_pain || null;
+    } else {
+      const buckets = Object.values(data.by_expiry);
+      if (buckets.length > 0) {
+        const minDteBucket = buckets.reduce((prev, curr) => prev.dte_bucket < curr.dte_bucket ? prev : curr);
+        overallMaxPain = minDteBucket.max_pain || null;
+      }
+    }
 
     return { 
        gexProfile: gexFiltered, 
-       volSurface: volArr,
+       volSurface: volFiltered,
        posGexTot: posGex,
        negGexTot: negGex,
-       netGexTot: posGex + negGex
+       netGexTot: posGex + negGex,
+       callWallStrike,
+       putWallStrike,
+       overallMaxPain
     };
   }, [data, activeDte]);
 
@@ -154,20 +219,30 @@ export default function GreeksSurfaces({ data }: GreeksSurfacesProps) {
          {/* CHART: GEX Profile / Walls */}
          <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/50 p-4">
             <div className="flex justify-between items-center mb-4">
-               <h3 className="text-xs font-mono text-zinc-400 uppercase tracking-wider">GEX Profile (Call vs Put Wall)</h3>
-               <span className="text-[10px] text-zinc-600 font-mono">Spot: ${data.spot.toFixed(2)}</span>
+               <div>
+                  <h3 className="text-xs font-mono text-zinc-400 uppercase tracking-wider">GEX Profile (Call vs Put Wall)</h3>
+                  <div className="flex gap-4 mt-1 text-[10px] font-mono">
+                     <span className="text-emerald-400">Call Wall: {callWallStrike > 0 ? callWallStrike : "-"}</span>
+                     <span className="text-red-400">Put Wall: {putWallStrike > 0 ? putWallStrike : "-"}</span>
+                  </div>
+               </div>
+               <span className="text-[10px] text-zinc-600 font-mono">Spot: ${data.spot ? data.spot.toFixed(2) : "N/A"}</span>
             </div>
             <ResponsiveContainer width="100%" height={260}>
-               <BarChart data={gexProfile} margin={{ top: 0, right: 0, left: -20, bottom: 0 }} barGap={0} barCategoryGap="10%">
+               <ComposedChart data={gexProfile} margin={{ top: 20, right: 0, left: -20, bottom: 0 }} barGap={0} barCategoryGap="10%">
                   <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
                   <XAxis dataKey="strike" tick={{ fill: "#52525b", fontSize: 10, fontFamily: "monospace" }} />
-                  <YAxis tick={{ fill: "#52525b", fontSize: 10, fontFamily: "monospace" }} tickFormatter={(v) => v.toFixed(0)} />
+                  <YAxis tick={{ fill: "#52525b", fontSize: 10, fontFamily: "monospace" }} tickFormatter={(v) => v?.toFixed ? (v/1000).toFixed(0) + "k" : v} />
                   <Tooltip content={<CustomTooltip />} cursor={{fill: '#27272a', opacity: 0.4}} />
-                  <ReferenceLine x={data.spot} stroke="#e4e4e7" strokeDasharray="3 3" label={{ position: 'top', value: 'Spot', fill: '#e4e4e7', fontSize: 10 }} />
                   <ReferenceLine y={0} stroke="#3f3f46" />
-                  <Bar dataKey="call_gex" name="Call GEX" fill="#34d399" stackId="stack" />
-                  <Bar dataKey="put_gex" name="Put GEX" fill="#f87171" stackId="stack" />
-               </BarChart>
+                  
+                  {data.spot && <ReferenceLine x={data.spot} stroke="#3b82f6" strokeDasharray="4 4" label={<CustomReferenceLabel value="Current Price" fill="#3b82f6" position="bottom" />} />}
+                  {overallMaxPain && <ReferenceLine x={overallMaxPain} stroke="#f59e0b" strokeDasharray="4 4" label={<CustomReferenceLabel value="Max Pain" fill="#f59e0b" position="top" />} />}
+                  
+                  <Bar dataKey="call_gex" name="Call GEX" fill="#10b981" stackId="stack" />
+                  <Bar dataKey="put_gex" name="Put GEX" fill="#ef4444" stackId="stack" />
+                  <Line type="monotone" dataKey="abs_gex" name="Absolute GEX" stroke="#eab308" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: "#eab308" }} />
+               </ComposedChart>
             </ResponsiveContainer>
          </div>
 
@@ -178,10 +253,10 @@ export default function GreeksSurfaces({ data }: GreeksSurfacesProps) {
                <LineChart data={volSurface} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
                   <XAxis dataKey="strike" tick={{ fill: "#52525b", fontSize: 10, fontFamily: "monospace" }} />
-                  <YAxis tick={{ fill: "#52525b", fontSize: 10, fontFamily: "monospace" }} tickFormatter={(v) => `${v.toFixed(0)}%`} domain={['auto', 'auto']} />
+                  <YAxis tick={{ fill: "#52525b", fontSize: 10, fontFamily: "monospace" }} tickFormatter={(v) => v?.toFixed ? `${v.toFixed(0)}%` : `${v}%`} domain={['auto', 'auto']} />
                   <Tooltip content={<CustomTooltip />} />
                   <Legend wrapperStyle={{ fontSize: 10, fontFamily: "monospace", color: "#71717a" }} />
-                  <ReferenceLine x={data.spot} stroke="#e4e4e7" strokeDasharray="3 3" />
+                  {data.spot && <ReferenceLine x={data.spot} stroke="#e4e4e7" strokeDasharray="3 3" />}
                   
                   {activeDte === "all" ? (
                      // Draw top 3 common DTEs

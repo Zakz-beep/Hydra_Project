@@ -14,7 +14,10 @@ apis = [
     (".", "risk_api:app", 8002),
     (".", "regime_api:app", 8007),
     ("volatality", "api:app", 8006),
-    ("correlaction", "api:app", 8004)
+    ("correlaction", "api:app", 8004),
+    (".", "cot_api:app", 8008),
+    ("dispersion", "api:app", 8009),
+    (".", "hrp_api:app", 8010),
 ]
 
 processes = []

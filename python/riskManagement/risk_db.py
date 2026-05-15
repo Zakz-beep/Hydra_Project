@@ -5,7 +5,7 @@ from datetime import datetime
 
 class RiskDatabase:
     """Standalone Database for the Risk Management Module."""
-    def __init__(self, db_path="risk_portfolio.db"):
+    def __init__(self, db_path="data/risk_portfolio.db"):
         self.db_path = db_path
         self._init_db()
 

@@ -8,8 +8,9 @@ import MSARChart from "./MSARChart";
 import HARCJChart from "./HAR_CJChart";
 import KalmanHARCJChart from "./KalmanHARCJChart";
 import HybridArbChart from "./HybridArbChart";
+import LGBMRegimeDashboard from "./LGBMRegimeDashboard";
 
-type TabId = "meta" | "har" | "hmm" | "msar" | "har_cj" | "kalman" | "monte_carlo" | "hybrid";
+type TabId = "meta" | "har" | "hmm" | "msar" | "har_cj" | "kalman" | "monte_carlo" | "hybrid" | "lgbm";
 
 const TABS: { id: TabId; label: string; icon: string; desc: string }[] = [
   { id: "meta",  label: "Overview",    icon: "⬡", desc: "Pipeline Meta & Key Signals" },
@@ -20,6 +21,7 @@ const TABS: { id: TabId; label: string; icon: string; desc: string }[] = [
   { id: "kalman", label: "Kalman",      icon: "🔬", desc: "Adaptive State-Space Volatility Engine" },
   { id: "monte_carlo", label: "Monte Carlo", icon: "🎲", desc: "Regime-Switching Simulation" },
   { id: "hybrid", label: "Hybrid Arb", icon: "⚖️", desc: "Hybrid Arbitrage Strategy" },
+  { id: "lgbm",   label: "LightGBM",   icon: "🤖", desc: "Intraday Regime Classifier (Vanna/VIX TS)" },
 ];
 
 const PERIOD_OPTIONS = [
@@ -326,6 +328,7 @@ export default function VolatilityDashboard() {
           {activeTab === "har_cj" && <HARCJChart initialTicker={data.tickers[0] || tickersInput} />}
           {activeTab === "kalman" && <KalmanHARCJChart initialTicker={data.tickers[0] || tickersInput} />}
           {activeTab === "hybrid" && <HybridArbChart initialTicker={data.tickers[0] || tickersInput} />}
+          {activeTab === "lgbm"   && <LGBMRegimeDashboard initialTicker={data.tickers[0] || tickersInput} />}
         </div>
       )}
 

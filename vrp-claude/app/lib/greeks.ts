@@ -74,6 +74,7 @@ export interface GreeksSnapshot {
   total_net_charm: number;
   total_net_dai:   number;
   total_net_vex:   number;
+  total_gross_gex: number;
   
   gex_regime:      string;
   gamma_flip:      number | null;
@@ -97,7 +98,7 @@ export interface GreeksHistoryResponse {
 export interface GreeksTSResponse {
   ticker: string;
   n: number;
-  series: { time: string; spot: number; total_net_gex: number; gex_regime: string; gamma_flip: number | null }[];
+  series: { time: string; spot: number; total_net_gex: number; total_gross_gex: number; gex_regime: string; gamma_flip: number | null }[];
 }
 
 export interface HorizonSummary {
@@ -167,7 +168,130 @@ export async function fetchGreeksSignalLog(ticker: string, n = 50): Promise<Gree
 
 // Helper formatting
 export function fmtGex(val: number): string {
-  // Misal dalam billions, atau minimal 2 desimal
-  const sign = val > 0 ? "+" : "";
-  return `${sign}${val.toFixed(2)}`;
+  if (val === undefined || val === null || isNaN(val)) return "--";
+  const sign = val >= 0 ? "+" : "-";
+  const absVal = Math.abs(val);
+  
+  if (absVal >= 1e9) {
+    return `${sign}$${(absVal / 1e9).toFixed(2)}B`;
+  } else if (absVal >= 1e6) {
+    return `${sign}$${(absVal / 1e6).toFixed(2)}M`;
+  } else if (absVal >= 1e3) {
+    return `${sign}$${(absVal / 1e3).toFixed(2)}K`;
+  }
+  return `${sign}$${absVal.toFixed(2)}`;
+}
+
+// ─────────────────────────────────────────────────
+// Gamma Bounce Score (GBS) types
+// ─────────────────────────────────────────────────
+
+export interface GBSWallComponents {
+  gex_score:    number;
+  oi_score:     number;
+  prox_score:   number;
+  vanna_bonus:  number;
+  rvol_penalty: number;
+}
+
+export interface GBSWall {
+  strike:       number;
+  dist_pct:     number;
+  total_gex:    number;
+  total_oi:     number;
+  net_vanna:    number;
+  wall_type:    "CALL_WALL" | "PUT_WALL";
+  behavior:     string;
+  price_action: "BOUNCE_DOWN" | "BOUNCE_UP";
+  score:        number;
+  components:   GBSWallComponents;
+}
+
+export interface GBSResponse {
+  timestamp:          string;
+  ticker:             string;
+  spot:               number;
+  total_net_gex:      number;
+  gex_regime:         string;
+  overall_score:      number;
+  regime:             "EXTREME" | "STRONG" | "MODERATE" | "WEAK" | "MINIMAL";
+  vix_change:         number;
+  rvol:               number;
+  rvol_regime:        "EXTREME_VOL" | "HIGH" | "NORMAL" | "LOW";
+  today_volume:       number;
+  avg_volume_20:      number;
+  total_net_vanna:    number;
+  total_net_charm:    number;
+  nearest_resistance: GBSWall | null;
+  nearest_support:    GBSWall | null;
+  walls:              GBSWall[];
+  message?:           string;
+}
+
+export async function fetchGBS(ticker: string, force = false): Promise<GBSResponse> {
+  const url = `/api/greeks/gbs?ticker=${encodeURIComponent(ticker)}${force ? "&force=true" : ""}`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error("GBS fetch failed");
+  return res.json();
+}
+
+// ─────────────────────────────────────────────────
+// Expected Move types
+// ─────────────────────────────────────────────────
+
+export interface EMPeriod {
+  label:          string;
+  trading_days:   number;
+  iv_used:        number;
+  em_1sigma:      number;
+  em_2sigma:      number;
+  em_1sigma_pct:  number;
+  em_2sigma_pct:  number;
+  upper_1s:       number;
+  lower_1s:       number;
+  upper_2s:       number;
+  lower_2s:       number;
+}
+
+export interface EMByExpiry {
+  bucket:         string;
+  label:          string;
+  dte:            number;
+  atm_strike:     number;
+  atm_iv:         number;
+  em_1sigma:      number;
+  em_2sigma:      number;
+  em_1sigma_pct:  number;
+  em_2sigma_pct:  number;
+  upper_1s:       number;
+  lower_1s:       number;
+  upper_2s:       number;
+  lower_2s:       number;
+}
+
+export interface ExpectedMoveResponse {
+  timestamp:            string;
+  ticker:               string;
+  spot:                 number;
+  prev_close:           number;
+  day_high:             number;
+  day_low:              number;
+  actual_move:          number;
+  actual_move_pct:      number;
+  actual_range:         number;
+  actual_range_pct:     number;
+  annualized_iv:        number;
+  em_1d:                number;
+  overextension:        number;
+  overextension_regime: "EXTREME" | "EXTENDED" | "AT_BOUNDARY" | "WITHIN_RANGE";
+  range_utilization:    number;
+  standard_periods:     EMPeriod[];
+  by_expiry:            EMByExpiry[];
+}
+
+export async function fetchExpectedMove(ticker: string, force = false): Promise<ExpectedMoveResponse> {
+  const url = `/api/greeks/expected-move?ticker=${encodeURIComponent(ticker)}${force ? "&force=true" : ""}`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error("Expected Move fetch failed");
+  return res.json();
 }

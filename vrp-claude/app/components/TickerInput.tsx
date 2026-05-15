@@ -1,18 +1,25 @@
 // app/components/TickerInput.tsx
 "use client";
 
-import { useState, KeyboardEvent } from "react";
+import { useState, KeyboardEvent, useRef } from "react";
 
 const PRESETS = ["^GSPC", "^NDX", "QQQ", "SPY", "NQ=F", "BBRI.JK", "TLKM.JK"];
 
 interface TickerInputProps {
-  value:     string;
-  onChange:  (ticker: string) => void;
-  loading?:  boolean;
+  value:    string;
+  onChange: (ticker: string) => void;
+  loading?: boolean;
+}
+
+/** Fire-and-forget: pre-warm Greeks cache in background */
+function warmGreeksCache(ticker: string) {
+  fetch(`/api/greeks/warm?ticker=${encodeURIComponent(ticker)}`, { method: "POST" })
+    .catch(() => {/* ignore */});
 }
 
 export default function TickerInput({ value, onChange, loading }: TickerInputProps) {
   const [draft, setDraft] = useState(value);
+  const warmedRef = useRef<Set<string>>(new Set());
 
   const submit = () => {
     const t = draft.trim().toUpperCase();
@@ -21,6 +28,14 @@ export default function TickerInput({ value, onChange, loading }: TickerInputPro
 
   const onKey = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") submit();
+  };
+
+  const handlePresetHover = (t: string) => {
+    // Only warm once per session to avoid spamming
+    if (!warmedRef.current.has(t) && t !== value) {
+      warmedRef.current.add(t);
+      warmGreeksCache(t);
+    }
   };
 
   return (
@@ -61,6 +76,7 @@ export default function TickerInput({ value, onChange, loading }: TickerInputPro
           <button
             key={t}
             onClick={() => { setDraft(t); onChange(t); }}
+            onMouseEnter={() => handlePresetHover(t)}
             className={`px-2 py-0.5 rounded font-mono text-[10px] border transition-colors cursor-pointer
               ${value === t
                 ? "bg-zinc-700 border-zinc-500 text-zinc-200"

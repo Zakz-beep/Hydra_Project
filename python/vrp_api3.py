@@ -889,6 +889,118 @@ def get_legatruu_history(tail: int = Query(default=30, ge=1)):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+# ═══════════════════════════════════════════════
+# PAPER TRADING API
+# ═══════════════════════════════════════════════
+
+class PaperTradeRequest(BaseModel):
+    ticker: str
+    mode: str
+    entry_price: float
+    margin: float
+    leverage: int
+    qty: float
+    tp_price: Optional[float] = None
+    sl_price: Optional[float] = None
+
+class PaperCloseRequest(BaseModel):
+    id: str
+    close_price: float
+    close_reason: str
+
+class PaperBalanceRequest(BaseModel):
+    balance: float
+
+@app.get("/api/paper/state")
+def get_paper_state():
+    try:
+        balance = db.get_paper_balance()
+        positions = db.get_paper_positions()
+        history = db.get_paper_history(limit=50)
+        return {
+            "balance": balance,
+            "positions": positions,
+            "history": history
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/paper/balance")
+def set_paper_balance(req: PaperBalanceRequest):
+    try:
+        db.update_paper_balance(req.balance)
+        return {"status": "success", "new_balance": req.balance}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/paper/trade")
+def open_paper_trade(req: PaperTradeRequest):
+    try:
+        import uuid
+        balance = db.get_paper_balance()
+        if req.margin > balance:
+            raise HTTPException(status_code=400, detail="Insufficient balance")
+        
+        # Deduct margin
+        new_balance = balance - req.margin
+        db.update_paper_balance(new_balance)
+        
+        # Create position
+        pos_id = str(uuid.uuid4())
+        pos = {
+            "id": pos_id,
+            "ticker": req.ticker,
+            "mode": req.mode,
+            "entry_price": req.entry_price,
+            "tp_price": req.tp_price,
+            "sl_price": req.sl_price,
+            "margin": req.margin,
+            "leverage": req.leverage,
+            "qty": req.qty,
+            "created_at": datetime.now().isoformat()
+        }
+        db.save_paper_position(pos)
+        
+        return {"status": "success", "position": pos, "new_balance": new_balance}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/paper/close")
+def close_paper_trade(req: PaperCloseRequest):
+    try:
+        positions = db.get_paper_positions()
+        pos = next((p for p in positions if p["id"] == req.id), None)
+        if not pos:
+            raise HTTPException(status_code=404, detail="Position not found")
+            
+        # Calculate PNL
+        price_diff = req.close_price - pos["entry_price"]
+        raw_pnl = pos["qty"] * price_diff
+        final_pnl = raw_pnl if pos["mode"] == "long" else -raw_pnl
+        
+        # Update balance
+        balance = db.get_paper_balance()
+        new_balance = balance + pos["margin"] + final_pnl
+        db.update_paper_balance(new_balance)
+        
+        # Save to history
+        history_entry = {
+            **pos,
+            "close_price": req.close_price,
+            "close_reason": req.close_reason,
+            "pnl": final_pnl,
+            "opened_at": pos["created_at"],
+            "closed_at": datetime.now().isoformat()
+        }
+        db.save_paper_history(history_entry)
+        
+        # Delete active position
+        db.delete_paper_position(pos["id"])
+        
+        return {"status": "success", "pnl": final_pnl, "new_balance": new_balance}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ═══════════════════════════════════════════════
 # RUN
