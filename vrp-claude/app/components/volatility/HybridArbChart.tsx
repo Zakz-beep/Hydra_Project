@@ -290,9 +290,9 @@ export default function HybridArbChart({ initialTicker }: Props) {
               margin: { l: 0, r: 0, b: 0, t: 0 },
               font: { family: 'Inter, sans-serif', color: '#64748b' },
               scene: {
-                xaxis: { title: 'DTE (Days)', color: '#64748b', gridcolor: '#1e2235', zerolinecolor: '#334155', showbackground: false },
-                yaxis: { title: 'Moneyness', color: '#64748b', gridcolor: '#1e2235', zerolinecolor: '#334155', showbackground: false },
-                zaxis: { title: 'Implied Vol (%)', color: '#64748b', gridcolor: '#1e2235', zerolinecolor: '#334155', showbackground: false },
+                xaxis: { title: { text: 'DTE (Days)' }, color: '#64748b', gridcolor: '#1e2235', zerolinecolor: '#334155', showbackground: false },
+                yaxis: { title: { text: 'Moneyness' }, color: '#64748b', gridcolor: '#1e2235', zerolinecolor: '#334155', showbackground: false },
+                zaxis: { title: { text: 'Implied Vol (%)' }, color: '#64748b', gridcolor: '#1e2235', zerolinecolor: '#334155', showbackground: false },
                 bgcolor: 'transparent',
                 camera: { eye: { x: 1.6, y: -1.6, z: 0.6 } }
               },

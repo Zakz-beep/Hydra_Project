@@ -43,7 +43,7 @@ export default function COTDashboard() {
                 
                 if (sorted.length > 0) {
                     // Cari tanggal paling baru di seluruh dataset
-                    const maxDate = sorted.reduce((latest, current) => {
+                    const maxDate = sorted.reduce((latest: string, current: any) => {
                         return current.Date && current.Date > latest ? current.Date : latest;
                     }, "1900-01-01");
                     

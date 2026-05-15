@@ -352,7 +352,7 @@ export default function TradingChart({
                     uniqueData.sort((a, b) => {
                         const timeA = typeof a.time === 'string' ? new Date(a.time).getTime() : a.time;
                         const timeB = typeof b.time === 'string' ? new Date(b.time).getTime() : b.time;
-                        return timeA - timeB;
+                        return (timeA as number) - (timeB as number);
                     });
 
                     const candleData = uniqueData.map(d => ({

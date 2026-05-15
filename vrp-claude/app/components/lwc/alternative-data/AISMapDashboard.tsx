@@ -145,7 +145,7 @@ export default function AISMapDashboard() {
     // Ships
     const activeFilter = filterRef.current;
     const selMmsi = selectedRef.current;
-    for (const ship of shipsRef.current.values()) {
+    for (const ship of Array.from(shipsRef.current.values())) {
       if (!matchesFilter(ship.shipType, activeFilter)) continue;
       const x = lonToX(ship.lon, W);
       const y = latToY(ship.lat, H);
@@ -320,7 +320,7 @@ export default function AISMapDashboard() {
     const H = canvas.height / window.devicePixelRatio;
 
     let best: ShipData | null = null, bestDist = Infinity;
-    for (const ship of shipsRef.current.values()) {
+    for (const ship of Array.from(shipsRef.current.values())) {
       if (!matchesFilter(ship.shipType, filterRef.current)) continue;
       const sx = lonToX(ship.lon, W), sy = latToY(ship.lat, H);
       const d = Math.hypot(sx - cx, sy - cy);

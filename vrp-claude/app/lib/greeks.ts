@@ -12,6 +12,8 @@ export interface GreeksSignals {
   dai_desc:      string;
   vex_signal:    string;
   vex_desc:      string;
+  dgci?:         number;
+  dgci_desc?:    string;
 }
 
 export interface StrikeGreeks {
