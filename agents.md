@@ -1,5 +1,57 @@
 # 🧠 VRP Dashboard — Project Memory for AI Agents
 
+## MarketData historical Greeks
+
+Read [MarketData history methodology](docs/marketdata-history.md) before editing historical imports, replay or backtests. `python/marketdata_provider.py`, `marketdata_history.py` and `marketdata_model.py` use a separate immutable EOD archive. Historical provider Greeks are unavailable: reconstruct IV/BSM with explicit assumed rate/dividend yield, never current Alpaca Greeks. Keep tokens only in ignored `python/.env.marketdata`. Imports consume credits only on explicit request; preserve cache scopes, cancellation and missing data. GEX uses USD per 1% move, no fabricated flip, and max pain only per actual expiry. Backtest signals at D EOD enter next exchange-session open and exit that close; never bridge missing sessions or call underlying returns options P&L. Read the guide's vintage, OI, exercise and Bayesian posterior limitations.
+
+## Actual-expiry Greeks levels
+
+Historical Surfaces uses the local MarketData `/surface-levels` endpoint with capture and exact-expiry validation. Reconstruct the original historical universe before filtering expiries, so common spot/IV remain aligned with replay. DTE is relative to the archived session. Its shared IV renderer accepts a minimal input; never fabricate a live snapshot or call live `/levels` for history. See the Historical Surfaces section of the MarketData guide.
+
+Read [expiry levels methodology](docs/greeks-expiry-levels.md) before changing surfaces, walls, gamma flip or max pain. `python/greeks_levels.py` computes date-scoped levels. Never fabricate expiry dates or gamma-flip boundaries; multi-expiry max pain is null. Walls are GEX maxima, separate from largest-OI strikes. Preserve USD-per-1%-move scaling and timestamp alignment; changing surface expiry scope must invalidate its memo even when the capture timestamp is unchanged.
+
+## Options Contract Workspace
+
+Read [Contract Workspace guide](docs/contract-workspace.md) before editing selected-contract charts or streaming. `python/options_workspace.py` adds REST history and one shared MessagePack Alpaca WebSocket on the existing Greeks API; the dedicated Next SSE route preserves cancellation. Keep indicative events separate from historical OHLC/volume, quote age separate from link heartbeat, native snapshot Greeks separate from streaming quotes, and tape gaps explicit. Close subscriptions on contract change/unmount; never expose credentials or add order execution implicitly.
+
+## Alpaca options migration
+
+Read [Alpaca options migration](docs/alpaca-options-migration.md) before editing The Greeks provider. `python/alpaca_options.py` uses the user's indicative feed by default; credentials belong only in ignored `python/.env.alpaca`. No synthetic fallback or automatic OPRA downgrade. Preserve dated OI, pagination, standard-contract filtering, nullable volume and quote provenance. Model BSM Greeks and native Alpaca Greeks are separate. New archives are feed-specific; legacy Yahoo history is read-only and must not be relabelled. Indicative quotes are modified, not executable OPRA prices. Unusual volume is not evidence of aggressor direction, institutional sweeps or opening positions. Yahoo holdings and RV/VIX daily research remain separate.
+
+## BETA sensitivity research
+
+Before editing BETA, read [BETA methodology](docs/beta-research.md). `python/beta_research.py` is the numerical engine and `beta_api.py` serves version 2 on 8012. Preserve common-price alignment without filling, simple returns, inclusive rolling endpoints, HAC/HC3 intervals and unavailable estimates as null. The intercept is not Jensen alpha; beta 1 is not market neutral. Scenario residual bands are descriptive, not calibrated prediction intervals. BETA uses explicit Run analysis and page-managed asset/benchmark inputs; keep the existing terminal code and renderer.
+
+## DCC correlation research
+
+Before editing DCC, read [DCC research methodology](docs/dcc-research.md). The active routed engine is `python/correlaction/copula_model.py`, with numerical helpers in `research.py`; `modeldcc.py` is legacy. Preserve lagged DCC recursion, simple-return compounding, initial-capital drawdown, explicit full-sample estimation limits, and empirical tail event counts. Do not call heuristic tail patterns a fitted copula or claim the exposure illustration is a validated strategy edge. DCC uses explicit Run analysis, pair matrix/radar, joint extremes, Exposure Lab and HMM diagnostics.
+
+## Footprint and full-stack launcher
+
+Footprint is a native LWC custom series using captured Hyperliquid executions. Read [footprint semantics](docs/footprint-chart.md) before changing its aggregation or imbalance logic; never derive bid/ask volume from OHLC. Start all registered APIs plus Next.js with `start_dashboard.cmd` (or `start_dashboard.py`). See [launcher guide](docs/start-dashboard.md). The shared API registry lives in `python/start_servers.py`; keep the previously excluded REPL excluded.
+
+## Agent Center (AGT)
+
+Read [Agent Center guide](docs/agent-center.md) before changing MCP, skills or job handoff. `agenthub` is the authenticated loopback API on 8016 in the shared launcher; `python/dashboard_mcp.py` is the stdio bridge launched by the client. One typed data-tool registry is in `python/agent_hub_tools.py`. Preserve atomic task leases, cancellation, pinned skill snapshots and credential secrecy. MCP does not launch external models or auto-claim jobs. Skill bundles are portable downloads; do not overwrite user client configs. Existing AI Quant Agent chat remains separate.
+
+## Macro Research (ECO)
+
+Read [macro research guide](docs/macro-research.md) before editing ECO. The Python scraper/API runs on 8015 (`macro` in the shared launcher), via the Next.js macro proxy. Keep calendar release dates separate from FRED reference periods; preserve missing actual/consensus and captured revisions. Forecasts use latest-revised data with an explicit vintage limitation, never claim a real-time backtest. Public-source coverage and failures must remain visible.
+
+Event Reaction uses captured release timestamps and completed Yahoo 5-minute bars. Preserve the strictly less than five-minute sampling lag, missing sessions, per-price capture times and archived prices; +24h means calendar hours. Scheduled timestamps without actuals are not confirmed publications. Reaction labels describe the selected asset, not a causal news effect. Never attach FRED reference-period forecasts to releases without a verified match. Read the Event Reaction section of the macro guide before editing its calculations.
+
+## ETF constituents and RV vs VIX methodology
+
+Read [research methodology](docs/greeks-market-research.md) before changing these Greeks tabs. ETF and constituent GEX are independent call-positive/put-negative model exposures, not observed dealer positions; never inherit the ETF gamma sign or multiply it by holding weights to manufacture stock GEX. RV/VIX uses the S&P 500 price index with a 30-calendar-day daily-close variance proxy and 365-day scaling. Keep backward context separate from matured forward evaluation, preserve missing data, and label the daily sampling approximation and holdings date limitations.
+
+## Main dashboard terminal commands
+
+Before adding or changing ticker/function codes, page navigation or the Bloomberg-style controller, read [Terminal agents.md](vrp-claude/public/terminal/agents.md). The single registry is `vrp-claude/app/lib/terminal/commands.ts`; actual renderers live in `app/page.tsx`. Do not add a visible code without a working page and ticker adapter. The new controller uses `useTerminalNavigation` plus URL/browser history, replacing the old `appMode` navigation described later in this historical memory.
+
+## Custom Python indicators (Chart Studio)
+
+Before creating or editing a custom Python indicator, read [INDICATOR_AI_GUIDE.md](vrp-claude/public/chart-studio/INDICATOR_AI_GUIDE.md). This portable guide applies to Codex, Antigravity, and other AI tools. It defines the actual `calculate(ctx)` SDK, data semantics, supported plots, runnable examples, and verification steps. The same file is downloadable in Python Studio via **AI guide .md**. Hyperliquid discovery includes active native and HIP-3 markets; preserve canonical names such as `xyz:TSLA`. `TSLAUSDT.P` is a search alias, not an API coin or a collateral declaration.
+
 > **Baca dokumen ini di awal setiap sesi** agar kamu memiliki konteks penuh tentang proyek ini.  
 > Diperbarui terakhir: 2026-05-10
 
@@ -360,6 +412,8 @@ File-file ini adalah **eksperimen standalone** (tidak terintegrasi ke dashboard)
 12. **`model/`** direktori berisi eksperimen research standalone — **bukan** bagian dari pipeline dashboard.
 13. **`python/yield/legatruu.py`** adalah fetcher data LEGATRUU/Term Premium untuk `LegatruuDashboard.tsx`.
 14. **Menjalankan backend**: Gunakan `uv run python start_servers.py` dari folder `python/`. Jangan jalankan server individual secara manual kecuali untuk debug.
+15. **Kerangka Berpikir Bayesian (Bayesian Inference Paradigm)**: Selalu gunakan pendekatan Bayesian Inference untuk setiap analisis pasar dan opsi. Mulai dengan Prior Hypothesis $P(H)$, kumpulkan bukti kuantitatif baru $P(E|H)$ (GEX, Charm, Vanna, Vol Skew, Max Pain, Macro/FRED Yields), lalu perbarui Posterior Probability $P(H|E)$ secara dinamis. Agen diizinkan dan didorong untuk secara proaktif menjalankan script atau mencari data tambahan untuk memperbarui keyakinan secara berkelanjutan.
+
 
 ---
 

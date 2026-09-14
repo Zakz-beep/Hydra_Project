@@ -2,14 +2,12 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from arch import arch_model
-from scipy.optimize import minimize
 from scipy.stats import rankdata
 from datetime import datetime, timedelta
-import warnings
 
-warnings.filterwarnings('ignore')
+from research import fit_dcc, pair_research, simulate_exposure
 
-def run_copula_model_api(tickers: list, mode: str = '4'):
+def run_copula_model_api(tickers: list, mode: str = '4', window: int = 20, threshold: float = .65, defensive: float = .1, cost_bps: float = 5):
     """
     Run DCC-GARCH + Copula model for API consumption.
     Returns summary metrics and timeseries DataFrame.
@@ -45,15 +43,22 @@ def run_copula_model_api(tickers: list, mode: str = '4'):
     except Exception as e:
         raise ValueError(f"Error mendownload data: {str(e)}")
 
+    downloaded_at = datetime.now().astimezone().isoformat()
     if isinstance(data, pd.Series):
         data = data.to_frame(name=tickers[0])
         
     if len(tickers) < 2:
         raise ValueError("Model DCC membutuhkan minimal 2 ticker untuk menghitung korelasi.")
 
+    data = data.reindex(columns=tickers).sort_index()
+    data = data.loc[~data.index.duplicated(keep='last')].replace([np.inf, -np.inf], np.nan)
+    missing = [t for t in tickers if data[t].dropna().empty]
+    if missing:
+        raise ValueError('No prices for: ' + ', '.join(missing))
+    data = data.where(data > 0)
     df_prices = data.dropna()
     
-    if len(df_prices) < 20:
+    if len(df_prices) < max(101, window + 2):
         raise ValueError(f"Data tidak cukup untuk dianalisa! Total baris hanya {len(df_prices)}.")
 
     returns = 100 * np.log(df_prices / df_prices.shift(1)).dropna()
@@ -67,73 +72,26 @@ def run_copula_model_api(tickers: list, mode: str = '4'):
             continue
         try:
             res = arch_model(returns[asset], vol='Garch', p=1, q=1, dist='normal').fit(disp='off')
+            if res.convergence_flag != 0:
+                raise ValueError('GARCH optimizer did not converge')
             resid = res.resid / res.conditional_volatility
+            if not np.isfinite(resid).all() or returns[asset].std() < 1e-8:
+                raise ValueError('Non-finite residuals or constant prices')
             std_residuals.append(resid)
             std_resid_df[asset] = resid
             valid_tickers.append(asset)
-        except Exception:
-            pass
+        except Exception as exc:
+            raise ValueError(f'GARCH failed for {asset}: {exc}') from exc
 
     if len(valid_tickers) < 2:
          raise ValueError("Tidak cukup asset valid untuk tahap DCC.")
 
     Z = np.column_stack(std_residuals)
     T, N = Z.shape
-    Q_bar = np.cov(Z.T)
-
-    def dcc_log_likelihood(params):
-        a, b = params
-        if a + b >= 0.999: return 1e10
-
-        Q_t = Q_bar
-        ll = 0
-        for t in range(T):
-            z_t = Z[t].reshape(N, 1)
-            Q_t = (1 - a - b) * Q_bar + a * (z_t @ z_t.T) + b * Q_t
-            
-            Q_t_diag = np.diag(Q_t).copy()
-            Q_t_diag[Q_t_diag <= 0] = 1e-8
-            
-            D_inv = np.diag(1.0 / np.sqrt(Q_t_diag))
-            R_t = D_inv @ Q_t @ D_inv
-
-            det_R = np.linalg.det(R_t)
-            if det_R <= 0: return 1e10
-            
-            try:
-                inv_R_t = np.linalg.inv(R_t)
-            except np.linalg.LinAlgError:
-                return 1e10
-                
-            ll += np.log(det_R) + (z_t.T @ inv_R_t @ z_t)[0,0]
-        return ll
-
-    opt = minimize(dcc_log_likelihood, [0.02, 0.95], bounds=[(0.001, 0.99)]*2, method='SLSQP')
-    a_opt, b_opt = opt.x
-
-    avg_corrs = []
-    asset_corrs_list = []
-    Q_t = Q_bar
-    for t in range(T):
-        z_t = Z[t].reshape(N, 1)
-        Q_t = (1 - a_opt - b_opt) * Q_bar + a_opt * (z_t @ z_t.T) + b_opt * Q_t
-        
-        Q_t_diag = np.diag(Q_t).copy()
-        Q_t_diag[Q_t_diag <= 0] = 1e-8
-        
-        D_inv = np.diag(1.0 / np.sqrt(Q_t_diag))
-        R_t = D_inv @ Q_t @ D_inv
-        
-        avg_corrs.append(np.mean(R_t[np.triu_indices(N, k=1)]))
-        
-        asset_corrs = {}
-        for i in range(N):
-            other_indices = [j for j in range(N) if i != j]
-            if other_indices:
-                asset_corrs[valid_tickers[i]] = np.mean(R_t[i, other_indices])
-            else:
-                asset_corrs[valid_tickers[i]] = 1.0
-        asset_corrs_list.append(asset_corrs)
+    matrices, fit = fit_dcc(Z)
+    avg_corrs = matrices[:, np.triu_indices(N, k=1)[0], np.triu_indices(N, k=1)[1]].mean(axis=1)
+    asset_corrs_list = [{name: float((matrix[i].sum()-1)/(N-1)) for i, name in enumerate(valid_tickers)} for matrix in matrices]
+    pairs, paths = pair_research(returns[valid_tickers], Z, matrices, window)
 
     # COPULA TAIL DEPENDENCE
     u_space = pd.DataFrame({col: rankdata(std_resid_df[col])/(T+1) for col in std_resid_df.columns})
@@ -163,14 +121,6 @@ def run_copula_model_api(tickers: list, mode: str = '4'):
     count_both_high = np.sum((u1 >= q_high) & (u2 >= q_high))
     lambda_U = count_both_high / count_u2_high if count_u2_high > 0 else 0.0
     
-    best_fit = "Gaussian"
-    if lambda_L > 0.1 and lambda_U > 0.1 and abs(lambda_L - lambda_U) < 0.1:
-        best_fit = "Student-t"
-    elif lambda_L > lambda_U + 0.05:
-        best_fit = "Clayton"
-    elif lambda_U > lambda_L + 0.05:
-        best_fit = "Gumbel"
-        
     sample_size = min(500, len(u1))
     u_space_sample = pd.DataFrame({'u1': u1, 'u2': u2}).tail(sample_size)
     u_space_points = u_space_sample.to_dict(orient='records')
@@ -232,7 +182,7 @@ def run_copula_model_api(tickers: list, mode: str = '4'):
     tail_dep_full = pd.Series(tail_dep_series, index=returns.index)
     tail_recent = tail_dep_full.tail(200)
     tail_dep_series_recent = [
-        {'timestamp': str(idx.date()), 'tail_dep': float(v)}
+        {'timestamp': idx.isoformat(), 'tail_dep': float(v)}
         for idx, v in tail_recent.items()
     ]
     
@@ -240,7 +190,8 @@ def run_copula_model_api(tickers: list, mode: str = '4'):
         'pair': [t1, t2],
         'lambda_L': float(lambda_L),
         'lambda_U': float(lambda_U),
-        'best_fit': best_fit,
+        'best_fit': None,
+        'method': 'Empirical conditional co-exceedance at 10%; no parametric copula fitted',
         'u_space_points': u_space_points,
         'returns_points': returns_points,
         'density_grid': density_grid,
@@ -253,25 +204,31 @@ def run_copula_model_api(tickers: list, mode: str = '4'):
         'tail_dep_series_recent': tail_dep_series_recent,
     }
 
-    df_bt = pd.DataFrame({'Avg_Corr': avg_corrs, 'Tail_Dep': tail_dep_series}, index=returns.index)
+    # Simple equal-weight returns for compounding; no FX conversion.
+    simple_returns = df_prices[valid_tickers].pct_change(fill_method=None).dropna().mean(axis=1)
+    # Past-only empirical residual quantiles for the exposure signal, warm-up 60 bars.
+    past_low = std_resid_df.expanding(min_periods=60).quantile(.1).shift(1)
+    signal_tail = std_resid_df.le(past_low).mean(axis=1)
+    df_bt = simulate_exposure(simple_returns, pd.Series(avg_corrs, index=returns.index), signal_tail,
+                              threshold, defensive, cost_bps)
+    df_bt['Avg_Corr'] = avg_corrs
+    df_bt['Tail_Dep'] = tail_dep_series
     df_bt['Asset_Corrs'] = asset_corrs_list
-    df_bt['Market_Ret'] = (returns / 100).mean(axis=1)
-
-    # Adaptive Weight Logic: Copula + DCC
-    df_bt['Weight'] = df_bt.apply(lambda x: 0.1 if (x['Avg_Corr'] > 0.65 or x['Tail_Dep'] > 0.5) else 1.0, axis=1)
-    
-    df_bt['Adaptive_Ret'] = df_bt['Weight'] * df_bt['Market_Ret']
-    df_bt['Passive_Ret'] = df_bt['Market_Ret']
-
-    INITIAL_CASH = 10000
-    df_bt['Passive_Equity'] = INITIAL_CASH * (1 + df_bt['Passive_Ret']).cumprod()
-    df_bt['Adaptive_Equity'] = INITIAL_CASH * (1 + df_bt['Adaptive_Ret']).cumprod()
-
-    df_bt['Passive_Peak'] = df_bt['Passive_Equity'].cummax()
-    df_bt['Passive_DD'] = (df_bt['Passive_Equity'] - df_bt['Passive_Peak']) / df_bt['Passive_Peak'] * 100
-
-    df_bt['Adaptive_Peak'] = df_bt['Adaptive_Equity'].cummax()
-    df_bt['Adaptive_DD'] = (df_bt['Adaptive_Equity'] - df_bt['Adaptive_Peak']) / df_bt['Adaptive_Peak'] * 100
+    df_bt['Pair_Corrs'] = [{key: float(path['dcc'][i]) for key, path in paths.items()} for i in range(T)]
+    df_bt['Rolling_Corrs'] = [{key: (float(path['rolling'][i]) if pd.notna(path['rolling'][i]) else None) for key, path in paths.items()} for i in range(T)]
+    df_bt.attrs['research'] = {
+        'version': 2, 'source': 'Yahoo Finance adjusted close', 'fetched_at': downloaded_at,
+        'first_bar': df_prices.index[0].isoformat(), 'last_bar': df_prices.index[-1].isoformat(),
+        'price_rows': len(data), 'aligned_prices': len(df_prices), 'dropped_rows': len(data)-len(df_prices),
+        'observations': T, 'window': window, 'matrix': matrices[-1].tolist(), 'pairs': pairs, 'fit': fit,
+        'settings': {'threshold': threshold, 'defensive': defensive, 'cost_bps': cost_bps},
+        'warnings': [
+            'Full-sample GARCH/DCC parameters and HMM smoothing use future sample information. This is descriptive in-sample research, not a walk-forward backtest.',
+            'Adjusted prices aligned on common timestamps without forward filling. Daily cross-market closes are not simultaneous; mixed currencies are local-return baskets, not USD portfolio valuations.',
+            'Exposure signals lag one bar. Cash earns zero; costs cover initial entry and aggregate exposure turnover only. Internal rebalancing, slippage, tax and financing are excluded.',
+            'Tail estimates use full-sample residual ranks at the 10% threshold, not asymptotic tail dependence or crash probabilities. Beta(1,1) intervals assume independent events; clustering can understate uncertainty.',
+            'Latest bar is the last downloaded observation. Intraday timestamps mark bar starts; there is no exchange-calendar or completed-bar guarantee.'
+        ]}
 
     summary_metrics = {
         'final_passive_equity': float(df_bt['Passive_Equity'].iloc[-1]),

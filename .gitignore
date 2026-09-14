@@ -1,10 +1,18 @@
 # Environments
 .env
+.env.local
+.env.*.local
+.env.local.*
+.env.alpaca
+.env.marketdata
+python/data/marketdata_history.db*
+python/data/greeks_alpaca_*.db*
 .venv/
 venv/
 env/
 
 # Python
+/python/data/macro.db*
 __pycache__/
 *.pyc
 *.pyo
@@ -34,7 +42,6 @@ node_modules/
 out/
 npm-debug.log
 yarn-error.log
-package-lock.json
 yarn.lock
 
 # OS generated files
@@ -61,3 +68,31 @@ scratch/
 
 # Next.js Build Cache
 vrp-claude/tsconfig.tsbuildinfo
+
+# Reproducible local Python browser runtime (npm run setup:chart-python)
+vrp-claude/public/chart-studio/runtime/
+# Agent Center local runtime
+python/data/agent_hub.db*
+python/data/agent_hub.key
+
+# Private machine configuration and generated research data
+.env.*
+!.env.example
+!.env.*.example
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.log
+.ua/
+.claude/
+.playwright-mcp/
+.mcp.json
+python/_temp/
+python/*_vol_surface.html
+python/scratch_*.py
+catatan.md
+python/annual.txt
+tasks/

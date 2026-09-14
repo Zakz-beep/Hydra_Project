@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "greeks-api": {
+      "command": "uv",
+      "args": [
+        "run",
+        "mcp",
+        "run",
+        "C:\\Users\\Akbar Alviansyah\\Downloads\\vrp-dashboard\\python\\greeks_mcp_server.py"
+      ],
+      "cwd": "C:\\Users\\Akbar Alviansyah\\Downloads\\vrp-dashboard\\python",
+      "description": "Options Greeks API — GEX, Vanna, Charm, DAI, VEX, GBS, Expected Move, UOA"
+    }
+  }
+}

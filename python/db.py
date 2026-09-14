@@ -203,6 +203,27 @@ CREATE TABLE IF NOT EXISTS paper_history (
     opened_at TEXT NOT NULL,
     closed_at TEXT NOT NULL
 );
+
+-- ── 8. Chat Sessions ─────────────────────────────────────────
+-- Menyimpan sesi percakapan AI Agent secara persisten.
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id          TEXT PRIMARY KEY,           -- UUID
+    name        TEXT NOT NULL,              -- Display name (user-editable)
+    ticker      TEXT NOT NULL DEFAULT 'SPY',
+    persona_id  TEXT NOT NULL DEFAULT 'default',
+    created_at  TEXT NOT NULL,              -- ISO8601
+    updated_at  TEXT NOT NULL,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    preview     TEXT NOT NULL DEFAULT '',   -- Last message snippet (80 chars)
+    messages_json TEXT NOT NULL DEFAULT '[]',         -- JSON array of Message objects
+    approval_history_json TEXT NOT NULL DEFAULT '[]', -- JSON array of HistoryMessage
+    conversation_state_json TEXT DEFAULT NULL,        -- JSON of agent conversation state
+    dag_nodes_json TEXT NOT NULL DEFAULT '[]',        -- JSON array of LiveStepNode (Spider Blueprint)
+    decision_tree_json TEXT DEFAULT NULL              -- JSON of DecisionTree | null
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_updated
+    ON chat_sessions (updated_at DESC);
 """
 
 
@@ -254,7 +275,7 @@ class VRPDatabase:
                     conn.close()
 
     def _init_db(self):
-        """Create tables kalau belum ada."""
+        """Create tables kalau belum ada, dan jalankan migration kalau perlu."""
         if self._path == ":memory:":
             self._mem_conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._mem_conn.row_factory = sqlite3.Row
@@ -263,6 +284,15 @@ class VRPDatabase:
         else:
             with self._conn() as conn:
                 conn.executescript(SCHEMA)
+                # ── Migration: tambah kolom baru ke chat_sessions kalau belum ada ──
+                existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(chat_sessions)").fetchall()}
+                migrations = [
+                    ("dag_nodes_json",      "ALTER TABLE chat_sessions ADD COLUMN dag_nodes_json TEXT NOT NULL DEFAULT '[]'"),
+                    ("decision_tree_json",  "ALTER TABLE chat_sessions ADD COLUMN decision_tree_json TEXT DEFAULT NULL"),
+                ]
+                for col_name, sql in migrations:
+                    if col_name not in existing_cols:
+                        conn.execute(sql)
 
     # ─────────────────────────────────────────────────
     # FEATURE 1: Persistent Snapshots
@@ -866,6 +896,91 @@ class VRPDatabase:
                 history['opened_at'], history.get('closed_at', datetime.now().isoformat())
             ))
 
+    # ─────────────────────────────────────────────────
+    # FEATURE 8: Chat Sessions
+    # ─────────────────────────────────────────────────
+
+    def list_sessions(self) -> list:
+        """Return all sessions sorted by updated_at desc (without heavy messages_json)."""
+        query = """
+        SELECT id, name, ticker, persona_id, created_at, updated_at,
+               message_count, preview
+        FROM chat_sessions
+        ORDER BY updated_at DESC
+        """
+        with self._conn() as conn:
+            return [dict(r) for r in conn.execute(query).fetchall()]
+
+    def get_session(self, session_id: str) -> Optional[dict]:
+        """Return a single session including full messages_json."""
+        query = "SELECT * FROM chat_sessions WHERE id = ?"
+        with self._conn() as conn:
+            row = conn.execute(query, (session_id,)).fetchone()
+            if row is None:
+                return None
+            return dict(row)
+
+    def create_session(self, session_id: str, name: str, ticker: str, persona_id: str) -> dict:
+        """Insert a new empty session."""
+        now = datetime.now().isoformat()
+        query = """
+        INSERT INTO chat_sessions
+            (id, name, ticker, persona_id, created_at, updated_at,
+             message_count, preview, messages_json, approval_history_json,
+             conversation_state_json, dag_nodes_json, decision_tree_json)
+        VALUES (?, ?, ?, ?, ?, ?, 0, '', '[]', '[]', NULL, '[]', NULL)
+        """
+        with self._conn() as conn:
+            conn.execute(query, (session_id, name, ticker, persona_id, now, now))
+        return {
+            "id": session_id, "name": name, "ticker": ticker, "persona_id": persona_id,
+            "created_at": now, "updated_at": now, "message_count": 0, "preview": ""
+        }
+
+    def update_session(self, session_id: str, name: Optional[str], messages_json: str,
+                       approval_history_json: str, conversation_state_json: Optional[str],
+                       message_count: int, preview: str,
+                       dag_nodes_json: str = '[]',
+                       decision_tree_json: Optional[str] = None):
+        """Upsert session data (save messages, dag nodes, decision tree)."""
+        now = datetime.now().isoformat()
+        query = """
+        UPDATE chat_sessions SET
+            updated_at = ?,
+            message_count = ?,
+            preview = ?,
+            messages_json = ?,
+            approval_history_json = ?,
+            conversation_state_json = ?,
+            dag_nodes_json = ?,
+            decision_tree_json = ?
+            {name_clause}
+        WHERE id = ?
+        """.format(name_clause=", name = ?" if name else "")
+
+        args = [now, message_count, preview, messages_json, approval_history_json,
+                conversation_state_json, dag_nodes_json, decision_tree_json]
+        if name:
+            args.append(name)
+        args.append(session_id)
+
+        with self._conn() as conn:
+            conn.execute(query, args)
+
+    def rename_session(self, session_id: str, name: str):
+        """Rename a session."""
+        now = datetime.now().isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE chat_sessions SET name = ?, updated_at = ? WHERE id = ?",
+                (name, now, session_id)
+            )
+
+    def delete_session(self, session_id: str):
+        """Delete a session by id."""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM chat_sessions WHERE id = ?", (session_id,))
+
 # ════════════════════════════════════════════════════════
 # MODULE-LEVEL SINGLETON
 # ════════════════════════════════════════════════════════
@@ -873,6 +988,7 @@ class VRPDatabase:
 # Import ini di vrp_api.py:
 #   from db import db
 # Langsung pakai tanpa instantiate ulang.
+
 
 db = VRPDatabase()
 

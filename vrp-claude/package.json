@@ -6,9 +6,20 @@
     "dev": "next dev -H 0.0.0.0",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "setup:chart-python": "node scripts/install-chart-python.cjs",
+    "test:chart-studio": "node --test tests/chart-studio.test.cjs tests/orderflow.test.cjs tests/greeks-input.test.cjs"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/commands": "^6.11.0",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/state": "^6.7.4",
+    "@codemirror/view": "^6.43.11",
+    "@lezer/highlight": "^1.2.3",
+    "@openrouter/agent": "^0.6.0",
+    "@openrouter/sdk": "^0.12.35",
     "lightweight-charts": "^5.2.0",
     "lucide-react": "^1.14.0",
     "next": "14.2.3",
@@ -16,7 +27,10 @@
     "react": "^18",
     "react-dom": "^18",
     "react-plotly.js": "^2.6.0",
-    "recharts": "^2.12.7"
+    "reactflow": "^11.11.4",
+    "recharts": "^2.12.7",
+    "rss-parser": "^3.13.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^20",

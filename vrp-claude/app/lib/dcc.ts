@@ -7,6 +7,8 @@ export interface DCCTimeseries {
   passive_dd: number;
   adaptive_dd: number;
   tail_dep: number;
+  pair_corrs?: Record<string, number>;
+  rolling_corrs?: Record<string, number | null>;
   hmm_state?: number | null;
   hmm_state_name?: string | null;
 }
@@ -88,7 +90,7 @@ export interface CopulaDetails {
   pair: string[];
   lambda_L: number;
   lambda_U: number;
-  best_fit: "Clayton" | "Gumbel" | "Student-t" | "Gaussian";
+  best_fit: "Clayton" | "Gumbel" | "Student-t" | "Gaussian" | null;
   u_space_points: USpacePoint[];
   returns_points: ReturnPoint[];
   density_grid: DensityCell[];
@@ -109,29 +111,48 @@ export interface DCCRunResponse {
   copula_details: CopulaDetails;
   hmm?: HMMResult;
   timeseries: DCCTimeseries[];
+  research: DCCResearch;
+}
+
+export interface DCCPair {
+  key: string; left: string; right: string; dcc: number; change: number | null;
+  rolling: number | null; historical: number; lower: number | null; upper: number | null;
+  lower_count: number; lower_total: number; posterior_mean: number; posterior_interval: number[]; sample_size: number;
+}
+export interface DCCResearch {
+  version: number; source: string; fetched_at: string; first_bar: string; last_bar: string;
+  price_rows: number; aligned_prices: number; dropped_rows: number; observations: number; window: number;
+  matrix: number[][]; pairs: DCCPair[];
+  fit: { a: number; b: number; persistence: number; converged: boolean; objective: number };
+  settings: { threshold: number; defensive: number; cost_bps: number }; warnings: string[];
 }
 
 export interface DCCRunRequest {
   tickers: string[];
   mode: string;
+  window?: number;
+  threshold?: number;
+  defensive?: number;
+  cost_bps?: number;
 }
 
 const API_BASE = "/api/dcc";
 
-export async function runDCCModel(req: DCCRunRequest): Promise<DCCRunResponse> {
+export async function runDCCModel(req: DCCRunRequest, signal?: AbortSignal): Promise<DCCRunResponse> {
   const res = await fetch(`${API_BASE}/run`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(req),
+    signal,
   });
   
   if (!res.ok) {
     let errDetail = "Unknown error";
     try {
       const errJson = await res.json();
-      errDetail = errJson.detail || errDetail;
+      errDetail = typeof errJson.detail === 'string' ? errJson.detail : Array.isArray(errJson.detail) ? errJson.detail.map((e: {msg: string}) => e.msg).join('; ') : errDetail;
     } catch (e) {}
     throw new Error(`DCC API Error: ${errDetail}`);
   }

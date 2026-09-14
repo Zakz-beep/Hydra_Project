@@ -1,6 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
+from typing import Literal
+import re
+import threading
 import uvicorn
 import json
 
@@ -8,7 +11,7 @@ from copula_model import run_copula_model_api
 from hmm_model import run_hmm_model
 from db import save_dcc_run, get_recent_runs, get_run_timeseries
 
-app = FastAPI(title="DCC-GARCH Correlation API", version="1.1")
+app = FastAPI(title="DCC-GARCH Correlation API", version="2.0")
 
 # Configure CORS
 app.add_middleware(
@@ -20,52 +23,33 @@ app.add_middleware(
 )
 
 class RunDCCRequest(BaseModel):
-    tickers: list[str]
-    mode: str = '4'  # '1': Scalper, '2': Day Trade, '3': Swing, '4': Core
+    tickers: list[str] = Field(min_length=2, max_length=12)
+    mode: Literal['1', '2', '3', '4'] = '4'
+    window: int = Field(default=20, ge=10, le=120)
+    threshold: float = Field(default=.65, ge=-1, le=1)
+    defensive: float = Field(default=.1, ge=0, le=1)
+    cost_bps: float = Field(default=5, ge=0, le=100)
 
-import yfinance as yf
-from datetime import datetime, timezone
-import pandas as pd
+    @field_validator('tickers')
+    @classmethod
+    def validate_tickers(cls, values):
+        names = [v.strip().upper() for v in values]
+        if len(set(names)) != len(names):
+            raise ValueError('Remove duplicate tickers.')
+        if any(not re.fullmatch(r'[A-Z0-9^][A-Z0-9.^=\-]{0,19}', t) for t in names):
+            raise ValueError('Invalid Yahoo Finance ticker.')
+        return names
 
-def check_market_status(tickers: list[str]) -> dict:
-    status = {}
-    try:
-        df = yf.download(tickers, period="5d", interval="15m", progress=False)['Close']
-        if isinstance(df, pd.Series):
-            df = df.to_frame(name=tickers[0])
-            
-        now_utc = datetime.now(timezone.utc)
-        
-        for t in tickers:
-            if t in df.columns:
-                last_valid = df[t].dropna()
-                if not last_valid.empty:
-                    last_time = last_valid.index[-1]
-                    if last_time.tzinfo is None:
-                        last_time = last_time.tz_localize('UTC')
-                    
-                    diff = (now_utc - last_time).total_seconds()
-                    # if last trade was within 60 minutes, consider open
-                    if diff < 3600:
-                        status[t] = "open"
-                    else:
-                        status[t] = "closed"
-                else:
-                    status[t] = "closed"
-            else:
-                status[t] = "closed"
-    except Exception:
-        for t in tickers:
-            status[t] = "unknown"
-            
-    return status
-
+run_lock = threading.Lock()
 
 @app.post("/api/dcc/run")
-async def run_dcc(req: RunDCCRequest):
+def run_dcc(req: RunDCCRequest):
+    if not run_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail='A correlation fit is running. Wait for it to finish before retrying.')
     try:
         # 1. Run DCC-GARCH + Copula model
-        valid_tickers, timeframe, history, summary, copula_details, df_bt = run_copula_model_api(req.tickers, req.mode)
+        valid_tickers, timeframe, history, summary, copula_details, df_bt = run_copula_model_api(
+            req.tickers, req.mode, req.window, req.threshold, req.defensive, req.cost_bps)
         
         # 2. Run HMM Regime Detection on top of DCC output
         #    Use portfolio mean return + DCC avg_corr as features
@@ -89,7 +73,8 @@ async def run_dcc(req: RunDCCRequest):
             hmm_result = {"error": str(hmm_err)}
 
         # 3. Check market status
-        market_status = check_market_status(valid_tickers)
+        # Price recency is not evidence that an exchange is open.
+        market_status = {t: 'unknown' for t in valid_tickers}
         
         # 4. Persist to database
         run_id = save_dcc_run(valid_tickers, timeframe, history, summary, df_bt)
@@ -119,6 +104,8 @@ async def run_dcc(req: RunDCCRequest):
                 "passive_dd": float(row['Passive_DD']),
                 "adaptive_dd": float(row['Adaptive_DD']),
                 "asset_corrs": row.get('Asset_Corrs', {}),
+                "pair_corrs": row.get('Pair_Corrs', {}),
+                "rolling_corrs": row.get('Rolling_Corrs', {}),
                 # HMM fields (null if state not available for this bar)
                 "hmm_state": hmm_state_lookup.get(ts_str, None),
                 "hmm_state_name": hmm_name_lookup.get(ts_str, None),
@@ -135,11 +122,14 @@ async def run_dcc(req: RunDCCRequest):
             "copula_details": copula_details,
             "hmm": hmm_result,
             "timeseries": timeseries_data,
+            "research": df_bt.attrs['research'],
         }
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+    finally:
+        run_lock.release()
 
 
 @app.get("/api/dcc/runs")

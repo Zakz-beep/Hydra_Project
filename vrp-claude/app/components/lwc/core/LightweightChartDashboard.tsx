@@ -1,5 +1,15 @@
-import React, { useState } from 'react';
-import TradingChart from '../core/TradingChart';
+'use client';
+
+import type { Instrument } from '../../../lib/chart-studio/types';
+import React, { useState, useRef, useCallback } from 'react';
+import dynamic from 'next/dynamic';
+import { IChartApi, ISeriesApi } from 'lightweight-charts';
+import TerminalChart from '../core/TerminalChart';
+import CanvasTerminalChart from '../engine/CanvasTerminalChart';
+import type { ChartType } from '../engine/types';
+import TerminalSidebar, { DrawingTool } from '../core/TerminalSidebar';
+import TerminalDrawingOverlay, { TerminalDrawingOverlayHandle, Drawing } from '../core/TerminalDrawingOverlay';
+import { THEMES, THEME_IDS, getTheme, getSavedThemeId, saveThemeId, TerminalTheme } from '../core/TerminalThemes';
 import MarketOverview from '../market/MarketOverview';
 import GEXComponent from '../alternative-data/GEXComponent';
 import YieldSpreadChart from '../macro/YieldSpreadChart';
@@ -13,7 +23,8 @@ import COTDashboard from '../alternative-data/COTDashboard';
 import VIXTermStructure from '../market/VIXTermStructure';
 import VVIXRatioAlert from '../market/VVIXRatioAlert';
 import HRPSizer from '../tools/HRPSizer';
-import AISMapDashboard from '../alternative-data/AISMapDashboard';
+import NewsDashboard from '../market/NewsDashboard';
+import AssetMetricsPanel from '../panels/AssetMetricsPanel';
 
 const playOrderSound = () => {
     if (typeof window !== 'undefined') {
@@ -22,22 +33,70 @@ const playOrderSound = () => {
     }
 };
 
-export default function LightweightChartDashboard() {
+const ChartStudio = dynamic(() => import('../studio/ChartWorkspace'), { ssr: false });
+export default function LightweightChartDashboard({ initialInstrument, onInstrumentChange }: { initialInstrument?: Instrument; onInstrumentChange?: (i: Instrument) => void }) {
+  const [legacy, setLegacy] = useState(false);
+  return legacy ? <><button onClick={() => setLegacy(false)} className="mb-3 rounded border border-teal-500/30 px-4 py-2 text-xs text-teal-300">← Back to Chart Studio</button><LegacyLightweightChartDashboard /></> : <ChartStudio onLegacy={() => setLegacy(true)} initialInstrument={initialInstrument} onInstrumentChange={onInstrumentChange} />;
+}
+
+function LegacyLightweightChartDashboard() {
+  // â”€â”€â”€ Theme State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [themeId, setThemeId] = useState(() => getSavedThemeId());
+  const [showThemeMenu, setShowThemeMenu] = useState(false);
+  const theme = getTheme(themeId);
+
+  const handleThemeChange = (id: string) => {
+    setThemeId(id);
+    saveThemeId(id);
+    setShowThemeMenu(false);
+  };
+
+  // â”€â”€â”€ Drawing Tools State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [activeTool, setActiveTool] = useState<DrawingTool>('cursor');
+  const drawingOverlayRef = useRef<TerminalDrawingOverlayHandle>(null);
+  const [drawings, setDrawings] = useState<Drawing[]>([]);
+  const canvasClearDrawingsRef = useRef<(() => void) | null>(null);
+
+  // â”€â”€â”€ Chart API refs for drawing overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [chartApi, setChartApi] = useState<IChartApi | null>(null);
+  const [mainSeries, setMainSeries] = useState<ISeriesApi<'Candlestick'> | null>(null);
+  const [chartDimensions, setChartDimensions] = useState({ width: 0, height: 0 });
+  const chartAreaRef = useRef<HTMLDivElement>(null);
+
+  const handleChartReady = useCallback((api: IChartApi, series: ISeriesApi<'Candlestick'>) => {
+    setChartApi(api);
+    setMainSeries(series);
+  }, []);
+
+  // â”€â”€â”€ Sidebar panel toggle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const [showPanel, setShowPanel] = useState(true);
+
   // Navigation State
-  const [chartView, setChartView] = useState<'price' | 'macro' | 'ais'>('price');
+  const [chartView, setChartView] = useState<'price' | 'macro' | 'news'>('price');
 
   // Market State
   const [tickerInput, setTickerInput] = useState('AAPL');
   const [activeTicker, setActiveTicker] = useState('AAPL');
   const intervals = ['1m', '5m', '15m', '1h', '4h', '1d'];
-  const [activeInterval, setActiveInterval] = useState('1m'); // default to 1m for paper trading feel
+  const [activeInterval, setActiveInterval] = useState('1m');
   const [currentPrice, setCurrentPrice] = useState<number | null>(null);
+
+  // Engine Toggle State
+  const [chartEngine, setChartEngine] = useState<'canvas' | 'lwc'>('canvas');
+  const [chartType, setChartType] = useState<ChartType>('candlestick');
+  const [rangeSize, setRangeSize] = useState(1.0);
+  const [renkoBrickSize, setRenkoBrickSize] = useState(0.5);
+  const [isHeikinAshi, setIsHeikinAshi] = useState(false);
 
   // Indicators State
   const [showSma, setShowSma] = useState(true);
   const [showVwap, setShowVwap] = useState(true);
   const [showGex, setShowGex] = useState(false);
+  const [showGexLevels, setShowGexLevels] = useState(false);
   const [showHistory, setShowHistory] = useState(true);
+  const [showAssetMetrics, setShowAssetMetrics] = useState(true);
+  
+  const [indicatorDrawings, setIndicatorDrawings] = useState<Drawing[]>([]);
 
   // Paper Trading State
   interface PaperPosition { id: string; ticker: string; mode: 'long' | 'short'; entry_price: number; tp_price?: number; sl_price?: number; margin: number; leverage: number; qty: number; created_at: string; }
@@ -55,6 +114,18 @@ export default function LightweightChartDashboard() {
   const [activePositions, setActivePositions] = useState<PaperPosition[]>([]);
   const [tradeHistory, setTradeHistory] = useState<PaperHistory[]>([]);
   const [marketPrices, setMarketPrices] = useState<Record<string, number>>({});
+
+  // â”€â”€â”€ Track chart container dimensions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  React.useEffect(() => {
+    if (!chartAreaRef.current) return;
+    const observer = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        setChartDimensions({ width: entry.contentRect.width, height: entry.contentRect.height });
+      }
+    });
+    observer.observe(chartAreaRef.current);
+    return () => observer.disconnect();
+  }, []);
 
   React.useEffect(() => {
       fetch('/api/paper/state')
@@ -99,6 +170,58 @@ export default function LightweightChartDashboard() {
       const interval = setInterval(fetchPrices, 15000);
       return () => clearInterval(interval);
   }, [activePositions, activeTicker, currentPrice]);
+
+  // â”€â”€â”€ Fetch GEX Levels for Chart Overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  React.useEffect(() => {
+      if (!showGexLevels) {
+          setIndicatorDrawings([]);
+          return;
+      }
+      
+      const fetchGexLevels = async () => {
+          try {
+              const res = await fetch(`/api/greeks/gex?ticker=${encodeURIComponent(activeTicker)}`);
+              if (!res.ok) throw new Error("Gagal fetch GEX data");
+              const data = await res.json();
+              
+              const buckets = ['0', '1', '7', '14', '30'];
+              const newDrawings: Drawing[] = [];
+              let idCounter = 1;
+              
+              const now = Math.floor(Date.now() / 1000);
+              
+              for (const b of buckets) {
+                  const bData = data.per_bucket?.[b];
+                  if (bData && bData.largest_gex_strike) {
+                      const isCallWall = bData.largest_gex_value > 0;
+                      // Determine color based on GEX value: Emerald for Positive (Call), Red for Negative (Put)
+                      const color = isCallWall ? '#34d399' : '#f87171';
+                      
+                      newDrawings.push({
+                          id: `gex_level_${b}_${idCounter++}`,
+                          type: 'horizontal_line',
+                          startTime: now - 86400 * 30, // arbitrary past
+                          startPrice: bData.largest_gex_strike,
+                          endTime: now + 86400 * 30,   // arbitrary future
+                          endPrice: bData.largest_gex_strike,
+                          color: color,
+                          label: `${b}DTE Wall: $${bData.largest_gex_strike}`,
+                          lineWidth: 2,
+                          textPosition: 'left'
+                      });
+                  }
+              }
+              
+              setIndicatorDrawings(newDrawings);
+          } catch (err) {
+              console.error("Error fetching GEX levels for overlay:", err);
+          }
+      };
+      
+      fetchGexLevels();
+      const interval = setInterval(fetchGexLevels, 60000); // refresh every minute
+      return () => clearInterval(interval);
+  }, [showGexLevels, activeTicker]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -232,141 +355,311 @@ export default function LightweightChartDashboard() {
       mode: currentTickerPosition.mode
   } : null;
 
+  // â”€â”€â”€ View Buttons â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const viewButtons = [
+    { id: 'price' as const, label: 'PRICE', color: theme.accent },
+    { id: 'macro' as const, label: 'MACRO', color: '#f59e0b' },
+    { id: 'news' as const, label: 'NEWS', color: '#10b981' },
+  ];
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-4" style={{ color: theme.panelText }}>
       <MarketOverview onSelectTicker={(symbol) => {
-          // Update both the input box and the active chart ticker
           setTickerInput(symbol);
           setActiveTicker(symbol);
       }} />
-      {/* Top controls — stack on mobile, row on sm+ */}
-      <div className="flex flex-col gap-3">
 
-        {/* Row 1: Title + View Switch */}
+      {/* â”€â”€â”€ Top Header Bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      <div className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 flex-wrap">
-            <h2 className="text-sm font-mono font-bold text-zinc-100 flex items-center gap-2">
-              <span className="text-indigo-400">VRP</span>
-              <span className="text-[10px] bg-indigo-500/20 text-indigo-300 px-2 py-0.5 rounded uppercase tracking-wider">Terminal</span>
+            {/* Logo */}
+            <h2 className="text-sm font-mono font-bold flex items-center gap-2" style={{ color: theme.panelText }}>
+              <span style={{ color: theme.accent }}>VRP</span>
+              <span
+                className="text-[10px] px-2 py-0.5 rounded uppercase tracking-wider"
+                style={{ backgroundColor: theme.accentDim, color: theme.accent }}
+              >
+                Pro Terminal
+              </span>
             </h2>
 
-            <div className="flex bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden">
+            {/* View Switcher */}
+            <div className="flex overflow-hidden rounded-lg" style={{ border: `1px solid ${theme.panelBorder}`, background: theme.panelBg }}>
+              {viewButtons.map(btn => (
                 <button
-                    onClick={() => setChartView('price')}
-                    className={`px-3 py-1.5 text-[11px] font-mono font-bold transition-colors ${
-                        chartView === 'price'
-                        ? 'bg-indigo-600 text-white'
-                        : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
-                    }`}
+                  key={btn.id}
+                  onClick={() => setChartView(btn.id)}
+                  className="px-3 py-1.5 text-[11px] font-mono font-bold transition-colors"
+                  style={{
+                    backgroundColor: chartView === btn.id ? btn.color : 'transparent',
+                    color: chartView === btn.id ? '#fff' : theme.panelTextDim,
+                  }}
                 >
-                    PRICE
+                  {btn.label}
                 </button>
-                <button
-                    onClick={() => setChartView('macro')}
-                    className={`px-3 py-1.5 text-[11px] font-mono font-bold transition-colors ${
-                        chartView === 'macro'
-                        ? 'bg-amber-600 text-white'
-                        : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
-                    }`}
-                >
-                    MACRO
-                </button>
-                <button
-                    onClick={() => setChartView('ais')}
-                    className={`px-3 py-1.5 text-[11px] font-mono font-bold transition-colors ${
-                        chartView === 'ais'
-                        ? 'bg-teal-600 text-white'
-                        : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
-                    }`}
-                >
-                    🌊 AIS
-                </button>
+              ))}
             </div>
           </div>
 
-          {/* Ticker form */}
-          <form onSubmit={handleSubmit} className="flex items-center gap-2 bg-zinc-900/80 p-1 rounded-lg border border-zinc-800">
-             <input 
-               type="text" 
-               value={tickerInput}
-               onChange={(e) => setTickerInput(e.target.value)}
-               placeholder="Ticker..."
-               className="bg-transparent border-none text-sm font-mono text-zinc-200 px-2 py-1 focus:outline-none focus:ring-1 focus:ring-indigo-500/50 rounded w-20 sm:w-28 uppercase"
-             />
-             <button 
-               type="submit"
-               className="bg-indigo-600 hover:bg-indigo-500 text-white font-mono text-xs px-3 py-1.5 rounded transition-colors shadow-sm"
-             >
-               Go
-             </button>
-          </form>
+          <div className="flex items-center gap-2">
+            {/* Engine Toggle */}
+            <button
+              onClick={() => setChartEngine(chartEngine === 'canvas' ? 'lwc' : 'canvas')}
+              className="px-2.5 py-1.5 rounded-lg font-mono text-[10px] font-bold uppercase transition-all duration-200 shadow-sm flex items-center gap-1.5 active:scale-95 hover:opacity-90 cursor-pointer"
+              style={{
+                backgroundColor: chartEngine === 'canvas' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(99, 102, 241, 0.15)',
+                color: chartEngine === 'canvas' ? '#22c55e' : '#6366f1',
+                border: '1px solid ' + (chartEngine === 'canvas' ? 'rgba(34,197,94,0.4)' : 'rgba(99,102,241,0.4)'),
+              }}
+              title={chartEngine === 'canvas' ? 'Click to switch to Lightweight Charts' : 'Click to switch to Custom Canvas Engine'}
+            >
+              <span className="relative flex h-2 w-2">
+                <span className={
+                  "animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 " + 
+                  (chartEngine === 'canvas' ? 'bg-green-400' : 'bg-indigo-400')
+                }></span>
+                <span className={
+                  "relative inline-flex rounded-full h-2 w-2 " + 
+                  (chartEngine === 'canvas' ? 'bg-green-500' : 'bg-indigo-500')
+                }></span>
+              </span>
+              {chartEngine === 'canvas' ? 'âš¡ CANVAS' : 'ðŸ“¦ LWC'}
+            </button>
+
+            {/* Theme Switcher Dropdown */}
+            <div className="relative">
+              <button
+                onClick={() => setShowThemeMenu(!showThemeMenu)}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-bold transition-colors"
+                style={{
+                  background: theme.panelBg,
+                  border: `1px solid ${theme.panelBorder}`,
+                  color: theme.panelTextDim,
+                }}
+              >
+                <span
+                  className="w-2.5 h-2.5 rounded-full"
+                  style={{ backgroundColor: theme.accent }}
+                />
+                {theme.label || theme.name}
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" className="ml-0.5 opacity-50">
+                  <path d="M2 3.5L5 7L8 3.5" stroke="currentColor" strokeWidth="1.2" fill="none" />
+                </svg>
+              </button>
+
+              {showThemeMenu && (
+                <>
+                  {/* Backdrop */}
+                  <div className="fixed inset-0 z-40" onClick={() => setShowThemeMenu(false)} />
+                  <div
+                    className="absolute right-0 top-full mt-1 z-50 rounded-lg shadow-2xl overflow-hidden"
+                    style={{
+                      background: theme.panelBg,
+                      border: `1px solid ${theme.panelBorder}`,
+                      minWidth: 160,
+                    }}
+                  >
+                    {THEME_IDS.map(id => {
+                      const t = THEMES[id];
+                      const isActive = id === themeId;
+                      return (
+                        <button
+                          key={id}
+                          onClick={() => handleThemeChange(id)}
+                          className="w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left transition-colors"
+                          style={{
+                            background: isActive ? t.accentDim : 'transparent',
+                            color: isActive ? t.accent : theme.panelTextDim,
+                          }}
+                          onMouseEnter={e => {
+                            if (!isActive) e.currentTarget.style.background = `${t.accent}12`;
+                          }}
+                          onMouseLeave={e => {
+                            if (!isActive) e.currentTarget.style.background = 'transparent';
+                          }}
+                        >
+                          <span
+                            className="w-3 h-3 rounded-full flex-shrink-0"
+                            style={{ backgroundColor: t.accent }}
+                          />
+                          <span className="font-mono text-[11px] font-bold">
+                            {t.label || t.name}
+                          </span>
+                          {isActive && (
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" className="ml-auto">
+                              <path d="M20 6L9 17L4 12" stroke={t.accent} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Panel Toggle */}
+            {chartView === 'price' && (
+              <button
+                onClick={() => setShowPanel(!showPanel)}
+                className="px-2 py-1.5 rounded-lg text-[11px] font-mono font-bold transition-colors"
+                style={{
+                  background: showPanel ? theme.accentDim : theme.panelBg,
+                  border: `1px solid ${theme.panelBorder}`,
+                  color: showPanel ? theme.accent : theme.panelTextDim,
+                }}
+                title={showPanel ? 'Hide Trading Panel' : 'Show Trading Panel'}
+              >
+                {showPanel ? 'âŸ©' : 'âŸ¨'} Panel
+              </button>
+            )}
+
+            {/* Ticker form */}
+            <form onSubmit={handleSubmit} className="flex items-center gap-2 p-1 rounded-lg" style={{ background: theme.panelBg, border: `1px solid ${theme.panelBorder}` }}>
+               <input 
+                 type="text" 
+                 value={tickerInput}
+                 onChange={(e) => setTickerInput(e.target.value)}
+                 placeholder="Ticker..."
+                 className="bg-transparent border-none text-sm font-mono px-2 py-1 focus:outline-none rounded w-20 sm:w-28 uppercase"
+                 style={{ color: theme.panelText }}
+               />
+               <button 
+                 type="submit"
+                 className="font-mono text-xs px-3 py-1.5 rounded transition-colors shadow-sm"
+                 style={{ backgroundColor: theme.accent, color: '#fff' }}
+               >
+                 Go
+               </button>
+            </form>
+          </div>
         </div>
 
-        {/* Row 2: Interval selector (scrollable on mobile) */}
+        {/* Row 2: Interval selector + Chart type + Engine toggle */}
         <div className="-mx-3 md:mx-0 overflow-x-auto">
-          <div className="flex gap-1 bg-zinc-900/80 p-1.5 rounded-lg border border-zinc-800 w-max min-w-full sm:min-w-0 mx-3 md:mx-0">
+          <div className="flex gap-2 items-center flex-wrap p-1.5 rounded-lg w-max min-w-full sm:min-w-0 mx-3 md:mx-0" style={{ background: theme.panelBg, border: `1px solid ${theme.panelBorder}` }}>
+             {/* Interval buttons */}
              {intervals.map((intv) => (
                  <button
                      key={intv}
                      onClick={() => setActiveInterval(intv)}
-                     className={`px-3 py-1.5 rounded font-mono text-xs transition-colors flex-1 sm:flex-none ${
-                         activeInterval === intv 
-                         ? 'bg-indigo-600 text-white shadow-sm' 
-                         : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
-                     }`}
+                     className="px-3 py-1.5 rounded font-mono text-xs transition-colors flex-1 sm:flex-none"
+                     style={{
+                       backgroundColor: activeInterval === intv ? theme.accent : 'transparent',
+                       color: activeInterval === intv ? '#fff' : theme.panelTextDim,
+                     }}
                  >
                      {intv}
                  </button>
              ))}
+
+             {/* Separator */}
+             <div style={{ width: 1, height: 20, background: theme.panelBorder }} />
+
+             {/* Chart Type selector */}
+             <div className="flex items-center gap-1">
+                 {(chartEngine === 'canvas' ? ['candlestick', 'range', 'renko', 'line', 'bars'] : ['candlestick', 'renko']).map(ct => (
+                   <button
+                     key={ct}
+                     onClick={() => setChartType(ct as ChartType)}
+                     className="px-2 py-1.5 rounded font-mono text-[10px] font-bold uppercase transition-colors"
+                     style={{
+                       backgroundColor: chartType === ct ? '#22c55e' : 'transparent',
+                       color: chartType === ct ? '#fff' : theme.panelTextDim,
+                     }}
+                   >
+                     {ct === 'candlestick' ? 'ðŸ•¯ï¸' : ct === 'range' ? 'ðŸ“Š' : ct === 'renko' ? 'ðŸ§±' : ct === 'line' ? 'ðŸ“ˆ' : 'â–'}
+                     {' '}{ct}
+                   </button>
+                 ))}
+
+                 {/* Range size input (canvas only) */}
+                 {chartType === 'range' && chartEngine === 'canvas' && (
+                   <div className="flex items-center gap-1">
+                     <span className="font-mono text-[10px]" style={{ color: theme.panelTextDim }}>Range $</span>
+                     <input
+                       type="number"
+                       value={rangeSize}
+                       onChange={e => setRangeSize(Math.max(0.01, parseFloat(e.target.value) || 0.01))}
+                       step="0.1"
+                       min="0.01"
+                       className="w-16 px-1.5 py-1 rounded font-mono text-[11px] focus:outline-none"
+                       style={{ background: theme.background, border: `1px solid ${theme.panelBorder}`, color: theme.panelText }}
+                     />
+                   </div>
+                 )}
+
+                 {/* Renko brick size input */}
+                 {chartType === 'renko' && (
+                   <div className="flex items-center gap-1">
+                     <span className="font-mono text-[10px]" style={{ color: theme.panelTextDim }}>Brick $</span>
+                     <input
+                       type="number"
+                       value={renkoBrickSize}
+                       onChange={e => setRenkoBrickSize(Math.max(0.01, parseFloat(e.target.value) || 0.01))}
+                       step="0.1"
+                       min="0.01"
+                       className="w-16 px-1.5 py-1 rounded font-mono text-[11px] focus:outline-none"
+                       style={{ background: theme.background, border: `1px solid ${theme.panelBorder}`, color: theme.panelText }}
+                     />
+                   </div>
+                 )}
+             </div>
+
+             {/* Heikin Ashi toggle (LWC engine only) */}
+             {chartEngine === 'lwc' && (
+                <button
+                  onClick={() => setIsHeikinAshi(!isHeikinAshi)}
+                  className="px-2 py-1.5 rounded font-mono text-[10px] font-bold uppercase transition-colors flex items-center gap-1.5"
+                  style={{
+                    backgroundColor: isHeikinAshi ? '#22c55e' : 'transparent',
+                    color: isHeikinAshi ? '#fff' : theme.panelTextDim,
+                  }}
+                  title="Toggle Heikin Ashi Candlesticks"
+                >
+                  <span style={{ filter: isHeikinAshi ? 'brightness(1.5)' : 'grayscale(1)' }}>ðŸ•¯ï¸</span>
+                  HA
+                </button>
+             )}
           </div>
         </div>
 
-        {/* Row 3: Powered by (desktop only) */}
-        <p className="text-[10px] font-mono text-zinc-600 hidden sm:block">
-           Powered by Lightweight Charts™ &amp; Yahoo Finance &amp; FRED
+        {/* Row 3: Powered by */}
+        <p className="text-[10px] font-mono hidden sm:block" style={{ color: theme.panelTextDim }}>
+           {chartEngine === 'canvas' ? 'Powered by Custom Canvas Engine' : 'Powered by Lightweight Chartsâ„¢'} & Yahoo Finance & FRED
         </p>
       </div>
 
-      {/* Main grid: on mobile stacks vertically, on lg side-by-side */}
+      {/* â”€â”€â”€ Main Grid â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
       <div className="flex flex-col lg:grid lg:grid-cols-4 gap-4 lg:gap-6">
           {/* LEFT: CHART AREA */}
-          <div className={`space-y-4 ${chartView === 'price' ? 'lg:col-span-3' : 'lg:col-span-4'}`}>
+          <div className={`space-y-4 ${chartView === 'price' && showPanel ? 'lg:col-span-3' : 'lg:col-span-4'}`}>
               {chartView === 'price' && (
                   <div className="overflow-x-auto">
-                    <div className="flex items-center gap-2 bg-zinc-900/40 p-2 px-4 rounded-xl border border-zinc-800 w-max">
-                        <span className="text-xs font-mono text-zinc-500 uppercase tracking-wider mr-2">Indicators:</span>
-                        <button
-                          onClick={() => setShowSma(!showSma)}
-                          className={`px-3 py-1.5 rounded font-mono text-xs transition-colors shadow-sm border ${
-                              showSma ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' : 'bg-zinc-900/80 text-zinc-500 border-zinc-800 hover:bg-zinc-800'
-                          }`}
-                        >
-                          SMA 20
-                        </button>
-                        <button
-                          onClick={() => setShowVwap(!showVwap)}
-                          className={`px-3 py-1.5 rounded font-mono text-xs transition-colors shadow-sm border ${
-                              showVwap ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-zinc-900/80 text-zinc-500 border-zinc-800 hover:bg-zinc-800'
-                          }`}
-                        >
-                          VWAP
-                        </button>
-                        <button
-                          onClick={() => setShowGex(!showGex)}
-                          className={`px-3 py-1.5 rounded font-mono text-xs transition-colors shadow-sm border ${
-                              showGex ? 'bg-violet-500/10 text-violet-400 border-violet-500/30' : 'bg-zinc-900/80 text-zinc-500 border-zinc-800 hover:bg-zinc-800'
-                          }`}
-                        >
-                          GREEKS
-                        </button>
-                        <button
-                          onClick={() => setShowHistory(!showHistory)}
-                          className={`px-3 py-1.5 rounded font-mono text-xs transition-colors shadow-sm border ${
-                              showHistory ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-zinc-900/80 text-zinc-500 border-zinc-800 hover:bg-zinc-800'
-                          }`}
-                        >
-                          HISTORY
-                        </button>
+                    <div className="flex items-center gap-2 p-2 px-4 rounded-xl w-max" style={{ background: `${theme.panelBg}88`, border: `1px solid ${theme.panelBorder}` }}>
+                        <span className="text-xs font-mono uppercase tracking-wider mr-2" style={{ color: theme.panelTextDim }}>Indicators:</span>
+                        {[
+                          { key: 'sma', label: 'SMA 20', active: showSma, toggle: () => setShowSma(!showSma), color: theme.smaColor },
+                          { key: 'vwap', label: 'VWAP', active: showVwap, toggle: () => setShowVwap(!showVwap), color: theme.vwapColor },
+                          { key: 'gex', label: 'GREEKS', active: showGex, toggle: () => setShowGex(!showGex), color: '#8b5cf6' },
+                          { key: 'gex_levels', label: 'GEX LEVELS', active: showGexLevels, toggle: () => setShowGexLevels(!showGexLevels), color: '#f59e0b' },
+                          { key: 'hist', label: 'HISTORY', active: showHistory, toggle: () => setShowHistory(!showHistory), color: theme.priceUp },
+                          { key: 'metrics', label: 'ASSET METRICS', active: showAssetMetrics, toggle: () => setShowAssetMetrics(!showAssetMetrics), color: theme.accent },
+                        ].map(ind => (
+                          <button
+                            key={ind.key}
+                            onClick={ind.toggle}
+                            className="px-3 py-1.5 rounded font-mono text-xs transition-colors shadow-sm"
+                            style={{
+                              background: ind.active ? `${ind.color}18` : theme.panelBg,
+                              color: ind.active ? ind.color : theme.panelTextDim,
+                              border: `1px solid ${ind.active ? `${ind.color}50` : theme.panelBorder}`,
+                            }}
+                          >
+                            {ind.label}
+                          </button>
+                        ))}
                     </div>
                   </div>
               )}
@@ -374,22 +667,80 @@ export default function LightweightChartDashboard() {
         <div className="lg:col-span-8 flex flex-col gap-4">
             {chartView === 'price' ? (
                 <>
-                    <TradingChart 
-                        ticker={activeTicker}
-                        interval={activeInterval}
-                        showSma={showSma}
-                        showVwap={showVwap}
-                        activePosition={mappedPosition}
-                        onPriceUpdate={setCurrentPrice}
-                    />
+                    {/* â”€â”€ Pro Terminal: Sidebar + Chart + Drawing Overlay â”€â”€â”€ */}
+                    <div className="flex rounded-xl overflow-hidden" style={{ border: `1px solid ${theme.panelBorder}`, background: theme.background }}>
+                      {/* Sidebar */}
+                      <TerminalSidebar
+                        activeTool={activeTool}
+                        onToolChange={setActiveTool}
+                        onClearAll={() => {
+                            if (chartEngine === 'canvas') {
+                                canvasClearDrawingsRef.current?.();
+                            } else {
+                                drawingOverlayRef.current?.clearAll();
+                            }
+                        }}
+                        onToggleObjectTree={() => {}}
+                        showObjectTree={false}
+                        drawingCount={drawings.length}
+                        theme={theme}
+                      />
+
+                      {/* Chart + Drawing Overlay Container */}
+                      <div className="flex-1 relative" ref={chartAreaRef} style={{ height: 560 }}>
+                        {chartEngine === 'canvas' ? (
+                          <CanvasTerminalChart
+                            ticker={activeTicker}
+                            interval={activeInterval}
+                            themeId={themeId}
+                            showSma={showSma}
+                            showVwap={showVwap}
+                            activePosition={mappedPosition}
+                            onPriceUpdate={setCurrentPrice}
+                            chartType={chartType}
+                            rangeSize={rangeSize}
+                            renkoBrickSize={renkoBrickSize}
+                            drawingTool={activeTool}
+                            onClearDrawings={(fn) => { canvasClearDrawingsRef.current = fn; }}
+                          />
+                        ) : (
+                          <TerminalChart
+                            ticker={activeTicker}
+                            interval={activeInterval}
+                            themeId={themeId}
+                            showSma={showSma}
+                            showVwap={showVwap}
+                            isHeikinAshi={isHeikinAshi}
+                            chartType={chartType}
+                            renkoBrickSize={renkoBrickSize}
+                            activePosition={mappedPosition}
+                            onPriceUpdate={setCurrentPrice}
+                            onChartReady={handleChartReady}
+                          />
+                        )}
+
+                        {/* Drawing Overlay (SVG on top of chart â€” LWC only for now) */}
+                        {chartEngine === 'lwc' && (
+                          <TerminalDrawingOverlay
+                            ref={drawingOverlayRef}
+                            activeTool={activeTool}
+                            chartApi={chartApi}
+                            mainSeries={mainSeries}
+                            theme={theme}
+                            width={chartDimensions.width}
+                            height={chartDimensions.height}
+                            drawings={drawings}
+                            indicatorDrawings={indicatorDrawings}
+                            onDrawingsChange={setDrawings}
+                          />
+                        )}
+                      </div>
+                    </div>
 
                     <VVIXRatioAlert />
                     <VIXTermStructure />
-                    
-                    {/* HRP MST Graph Component (Full Width) */}
                     <HRPSizer balance={balance} />
 
-                    {/* Component GEX/Vanna/Charm, hanya tampil jika showGex true */}
                     {showGex && (
                         <GEXComponent ticker={activeTicker} />
                     )}
@@ -402,8 +753,8 @@ export default function LightweightChartDashboard() {
                     <LegatruuDashboard />
                     <NetLiquidityChart />
                 </div>
-            ) : chartView === 'ais' ? (
-                <AISMapDashboard />
+            ) : chartView === 'news' ? (
+                <NewsDashboard ticker={activeTicker} />
             ) : null}
 
             {chartView === 'price' && showHistory && (
@@ -412,24 +763,33 @@ export default function LightweightChartDashboard() {
                     <TransactionHistoryPanel history={tradeHistory} />
                 </>
             )}
+
+            {chartView === 'price' && showAssetMetrics && (
+                <AssetMetricsPanel 
+                    ticker={activeTicker}
+                    interval={activeInterval}
+                    currentPrice={currentPrice}
+                />
+            )}
         </div>
           </div>
 
-          {/* RIGHT: TRADING PANEL (Only in Price View, stacks below chart on mobile) */}
-          {chartView === 'price' && (
+          {/* RIGHT: TRADING PANEL (Collapsible) */}
+          {chartView === 'price' && showPanel && (
               <div className="lg:col-span-1 space-y-4 flex flex-col">
                   {/* Account Balance Card */}
-              <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-5 shadow-xl relative overflow-hidden group">
-                  <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 to-emerald-500"></div>
+              <div className="rounded-xl p-5 shadow-xl relative overflow-hidden group" style={{ background: theme.panelBg, border: `1px solid ${theme.panelBorder}` }}>
+                  <div className="absolute top-0 left-0 w-full h-1" style={{ background: `linear-gradient(to right, ${theme.accent}, ${theme.priceUp})` }}></div>
                   <div className="flex justify-between items-center mb-1">
-                      <h3 className="text-xs font-mono text-zinc-500 uppercase tracking-wider">Available Balance</h3>
+                      <h3 className="text-xs font-mono uppercase tracking-wider" style={{ color: theme.panelTextDim }}>Available Balance</h3>
                       {!isEditingBalance && (
                           <button 
                               onClick={() => {
                                   setBalanceInputValue(balance.toString());
                                   setIsEditingBalance(true);
                               }}
-                              className="text-[10px] font-mono text-indigo-400 opacity-0 group-hover:opacity-100 transition-opacity hover:text-indigo-300 border border-indigo-500/30 bg-indigo-500/10 px-2 py-0.5 rounded"
+                              className="text-[10px] font-mono opacity-0 group-hover:opacity-100 transition-opacity px-2 py-0.5 rounded"
+                              style={{ color: theme.accent, border: `1px solid ${theme.accent}50`, background: theme.accentDim }}
                           >
                               EDIT
                           </button>
@@ -438,12 +798,13 @@ export default function LightweightChartDashboard() {
                   {isEditingBalance ? (
                       <div className="flex items-center gap-2 mt-1">
                           <div className="relative flex-1">
-                              <span className="absolute left-2 top-1/2 -translate-y-1/2 text-zinc-500 font-mono text-lg">$</span>
+                              <span className="absolute left-2 top-1/2 -translate-y-1/2 font-mono text-lg" style={{ color: theme.panelTextDim }}>$</span>
                               <input 
                                   type="number"
                                   value={balanceInputValue}
                                   onChange={e => setBalanceInputValue(e.target.value)}
-                                  className="w-full bg-zinc-900 border border-indigo-500/50 text-zinc-100 font-mono text-xl rounded py-1 pl-6 pr-2 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                  className="w-full font-mono text-xl rounded py-1 pl-6 pr-2 focus:outline-none"
+                                  style={{ background: theme.background, border: `1px solid ${theme.accent}80`, color: theme.panelText }}
                                   autoFocus
                                   onKeyDown={e => {
                                       if (e.key === 'Escape') setIsEditingBalance(false);
@@ -489,19 +850,21 @@ export default function LightweightChartDashboard() {
                                       alert("Invalid balance amount");
                                   }
                               }}
-                              className="bg-emerald-600 hover:bg-emerald-500 text-white p-1 rounded transition-colors"
+                              className="p-1 rounded transition-colors"
+                              style={{ background: theme.priceUp, color: '#fff' }}
                           >
                               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
                           </button>
                           <button 
                               onClick={() => setIsEditingBalance(false)}
-                              className="bg-zinc-800 hover:bg-zinc-700 text-zinc-400 p-1 rounded transition-colors"
+                              className="p-1 rounded transition-colors"
+                              style={{ background: theme.panelBorder, color: theme.panelTextDim }}
                           >
                               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                           </button>
                       </div>
                   ) : (
-                      <div className="text-3xl font-mono text-zinc-100 font-bold">
+                      <div className="text-3xl font-mono font-bold" style={{ color: theme.panelText }}>
                           ${balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </div>
                   )}
@@ -519,41 +882,43 @@ export default function LightweightChartDashboard() {
               />
 
               {/* Order Box */}
-              <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-5 shadow-xl flex-1 flex flex-col">
-                  <h3 className="text-sm font-mono text-zinc-100 uppercase tracking-wider mb-4 border-b border-zinc-800 pb-2">Place Order</h3>
+              <div className="rounded-xl p-5 shadow-xl flex-1 flex flex-col" style={{ background: theme.panelBg, border: `1px solid ${theme.panelBorder}` }}>
+                  <h3 className="text-sm font-mono uppercase tracking-wider mb-4 pb-2" style={{ color: theme.panelText, borderBottom: `1px solid ${theme.panelBorder}` }}>Place Order</h3>
                   
                   <div className="space-y-5 flex-1">
                       {/* Margin Input */}
                       <div className="space-y-2">
-                          <label className="flex justify-between text-xs font-mono text-zinc-400 uppercase">
+                          <label className="flex justify-between text-xs font-mono uppercase" style={{ color: theme.panelTextDim }}>
                               <span>Margin (USD)</span>
-                              <span className="text-indigo-400 cursor-pointer" onClick={() => setMarginInput(balance)}>Max</span>
+                              <span className="cursor-pointer" style={{ color: theme.accent }} onClick={() => setMarginInput(balance)}>Max</span>
                           </label>
                           <div className="relative">
-                              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 font-mono">$</span>
+                              <span className="absolute left-3 top-1/2 -translate-y-1/2 font-mono" style={{ color: theme.panelTextDim }}>$</span>
                               <input 
                                   type="number" 
                                   value={marginInput}
                                   onChange={e => setMarginInput(Number(e.target.value))}
-                                  className="w-full bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono text-lg rounded-lg py-2 pl-8 pr-3 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all"
+                                  className="w-full font-mono text-lg rounded-lg py-2 pl-8 pr-3 focus:outline-none transition-all"
+                                  style={{ background: theme.background, border: `1px solid ${theme.panelBorder}`, color: theme.panelText }}
                               />
                           </div>
                       </div>
 
                       {/* Leverage Slider */}
                       <div className="space-y-2">
-                          <label className="flex justify-between text-xs font-mono text-zinc-400 uppercase">
+                          <label className="flex justify-between text-xs font-mono uppercase" style={{ color: theme.panelTextDim }}>
                               <span>Leverage</span>
-                              <span className="text-emerald-400">{leverage}x</span>
+                              <span style={{ color: theme.priceUp }}>{leverage}x</span>
                           </label>
                           <input 
                               type="range" 
                               min="1" max="100" step="1"
                               value={leverage}
                               onChange={e => setLeverage(Number(e.target.value))}
-                              className="w-full accent-indigo-500"
+                              className="w-full"
+                              style={{ accentColor: theme.accent }}
                           />
-                          <div className="flex justify-between text-[10px] font-mono text-zinc-600">
+                          <div className="flex justify-between text-[10px] font-mono" style={{ color: theme.panelTextDim }}>
                               <span>1x</span>
                               <span>50x</span>
                               <span>100x</span>
@@ -563,40 +928,38 @@ export default function LightweightChartDashboard() {
                       {/* TP / SL Inputs */}
                       <div className="flex gap-4">
                           <div className="space-y-1 flex-1">
-                              <label className="text-[10px] font-mono text-zinc-500 uppercase">TP %</label>
-                              <div className="relative">
-                                  <input 
-                                      type="number" step="0.1" min="0"
-                                      value={tpPerc}
-                                      onChange={e => setTpPerc(Number(e.target.value))}
-                                      placeholder="0"
-                                      className="w-full bg-zinc-900 border border-zinc-700 text-emerald-400 font-mono text-sm rounded py-1.5 px-3 focus:outline-none focus:border-emerald-500"
-                                  />
-                              </div>
+                              <label className="text-[10px] font-mono uppercase" style={{ color: theme.panelTextDim }}>TP %</label>
+                              <input 
+                                  type="number" step="0.1" min="0"
+                                  value={tpPerc}
+                                  onChange={e => setTpPerc(Number(e.target.value))}
+                                  placeholder="0"
+                                  className="w-full font-mono text-sm rounded py-1.5 px-3 focus:outline-none"
+                                  style={{ background: theme.background, border: `1px solid ${theme.panelBorder}`, color: theme.priceUp }}
+                              />
                           </div>
                           <div className="space-y-1 flex-1">
-                              <label className="text-[10px] font-mono text-zinc-500 uppercase">SL %</label>
-                              <div className="relative">
-                                  <input 
-                                      type="number" step="0.1" min="0"
-                                      value={slPerc}
-                                      onChange={e => setSlPerc(Number(e.target.value))}
-                                      placeholder="0"
-                                      className="w-full bg-zinc-900 border border-zinc-700 text-red-400 font-mono text-sm rounded py-1.5 px-3 focus:outline-none focus:border-red-500"
-                                  />
-                              </div>
+                              <label className="text-[10px] font-mono uppercase" style={{ color: theme.panelTextDim }}>SL %</label>
+                              <input 
+                                  type="number" step="0.1" min="0"
+                                  value={slPerc}
+                                  onChange={e => setSlPerc(Number(e.target.value))}
+                                  placeholder="0"
+                                  className="w-full font-mono text-sm rounded py-1.5 px-3 focus:outline-none"
+                                  style={{ background: theme.background, border: `1px solid ${theme.panelBorder}`, color: theme.priceDown }}
+                              />
                           </div>
                       </div>
 
                       {/* Summary Data */}
-                      <div className="bg-zinc-900/50 rounded-lg p-3 space-y-2 border border-zinc-800/50">
+                      <div className="rounded-lg p-3 space-y-2" style={{ background: `${theme.background}88`, border: `1px solid ${theme.panelBorder}50` }}>
                           <div className="flex justify-between text-xs font-mono">
-                              <span className="text-zinc-500">Position Size</span>
-                              <span className="text-zinc-300">${(marginInput * leverage).toLocaleString()}</span>
+                              <span style={{ color: theme.panelTextDim }}>Position Size</span>
+                              <span style={{ color: theme.panelText }}>${(marginInput * leverage).toLocaleString()}</span>
                           </div>
                           <div className="flex justify-between text-xs font-mono">
-                              <span className="text-zinc-500">Current Price</span>
-                              <span className="text-zinc-300">{currentPrice ? `$${currentPrice.toFixed(2)}` : '--'}</span>
+                              <span style={{ color: theme.panelTextDim }}>Current Price</span>
+                              <span style={{ color: theme.panelText }}>{currentPrice ? `$${currentPrice.toFixed(2)}` : '--'}</span>
                           </div>
                       </div>
                   </div>
@@ -606,14 +969,16 @@ export default function LightweightChartDashboard() {
                       <button 
                           onClick={() => handleTrade('long')}
                           disabled={!currentPrice}
-                          className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-mono font-bold py-3 rounded-lg transition-colors shadow-lg shadow-emerald-900/20"
+                          className="disabled:opacity-50 disabled:cursor-not-allowed font-mono font-bold py-3 rounded-lg transition-colors shadow-lg"
+                          style={{ backgroundColor: theme.priceUp, color: '#fff' }}
                       >
                           LONG
                       </button>
                       <button 
                           onClick={() => handleTrade('short')}
                           disabled={!currentPrice}
-                          className="bg-red-600 hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-mono font-bold py-3 rounded-lg transition-colors shadow-lg shadow-red-900/20"
+                          className="disabled:opacity-50 disabled:cursor-not-allowed font-mono font-bold py-3 rounded-lg transition-colors shadow-lg"
+                          style={{ backgroundColor: theme.priceDown, color: '#fff' }}
                       >
                           SHORT
                       </button>
@@ -626,7 +991,7 @@ export default function LightweightChartDashboard() {
               {/* Active Positions Panel */}
               {activePositions.length > 0 && (
                   <div className="space-y-3">
-                      <h3 className="text-sm font-mono text-zinc-100 uppercase tracking-wider">Active Positions</h3>
+                      <h3 className="text-sm font-mono uppercase tracking-wider" style={{ color: theme.panelText }}>Active Positions</h3>
                       {activePositions.map(pos => {
                           const pnl = calculatePnl(pos);
                           const roi = pnl !== null ? (pnl / pos.margin) * 100 : null;
@@ -634,52 +999,58 @@ export default function LightweightChartDashboard() {
                           const markPrice = isViewingPosition ? currentPrice : marketPrices[pos.ticker];
                           
                           return (
-                              <div key={pos.id} className="bg-zinc-950 border border-indigo-500/30 rounded-xl p-4 shadow-xl relative overflow-hidden ring-1 ring-indigo-500/20">
-                                  <div className={`absolute top-0 left-0 w-full h-1 ${pos.mode === 'long' ? 'bg-emerald-500' : 'bg-red-500'}`}></div>
+                              <div key={pos.id} className="rounded-xl p-4 shadow-xl relative overflow-hidden" style={{ background: theme.panelBg, border: `1px solid ${theme.accent}50` }}>
+                                  <div className="absolute top-0 left-0 w-full h-1" style={{ background: pos.mode === 'long' ? theme.priceUp : theme.priceDown }}></div>
                                   
                                   <div className="flex justify-between items-start mb-3">
                                       <div>
                                           <div className="flex items-center gap-2">
-                                              <h3 className="text-lg font-mono font-bold text-zinc-100">{pos.ticker}</h3>
-                                              <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded uppercase ${pos.mode === 'long' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>
+                                              <h3 className="text-lg font-mono font-bold" style={{ color: theme.panelText }}>{pos.ticker}</h3>
+                                              <span
+                                                className="text-[10px] font-mono px-1.5 py-0.5 rounded uppercase"
+                                                style={{
+                                                  background: pos.mode === 'long' ? `${theme.priceUp}30` : `${theme.priceDown}30`,
+                                                  color: pos.mode === 'long' ? theme.priceUp : theme.priceDown,
+                                                }}
+                                              >
                                                   {pos.mode} {pos.leverage}x
                                               </span>
                                           </div>
-                                          <p className="text-[10px] font-mono text-zinc-500 mt-1">
+                                          <p className="text-[10px] font-mono mt-1" style={{ color: theme.panelTextDim }}>
                                               Size: {pos.qty.toFixed(4)}
                                           </p>
                                       </div>
                                       
                                       <div className="text-right">
-                                          <p className="text-[10px] font-mono text-zinc-500 uppercase">Unrealized PNL</p>
-                                          <p className={`text-xl font-mono font-bold ${pnl !== null ? (pnl >= 0 ? 'text-emerald-400' : 'text-red-400') : 'text-zinc-500'}`}>
+                                          <p className="text-[10px] font-mono uppercase" style={{ color: theme.panelTextDim }}>Unrealized PNL</p>
+                                          <p className="text-xl font-mono font-bold" style={{ color: pnl !== null ? (pnl >= 0 ? theme.priceUp : theme.priceDown) : theme.panelTextDim }}>
                                               {pnl !== null ? `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}` : '---'}
                                           </p>
-                                          <p className={`text-xs font-mono ${pnl !== null ? (pnl >= 0 ? 'text-emerald-500' : 'text-red-500') : 'text-zinc-600'}`}>
+                                          <p className="text-xs font-mono" style={{ color: pnl !== null ? (pnl >= 0 ? theme.priceUp : theme.priceDown) : theme.panelTextDim }}>
                                               {roi !== null ? `${roi >= 0 ? '+' : ''}${roi.toFixed(2)}%` : '---'}
                                           </p>
                                       </div>
                                   </div>
 
-                                  <div className="grid grid-cols-2 gap-y-2 gap-x-4 mb-3 bg-zinc-900/50 p-2 rounded-lg border border-zinc-800/50">
+                                  <div className="grid grid-cols-2 gap-y-2 gap-x-4 mb-3 p-2 rounded-lg" style={{ background: `${theme.background}88`, border: `1px solid ${theme.panelBorder}50` }}>
                                       <div>
-                                          <p className="text-[10px] font-mono text-zinc-500 uppercase">Entry Price</p>
-                                          <p className="text-sm font-mono text-zinc-300">${pos.entry_price.toFixed(2)}</p>
+                                          <p className="text-[10px] font-mono uppercase" style={{ color: theme.panelTextDim }}>Entry Price</p>
+                                          <p className="text-sm font-mono" style={{ color: theme.panelText }}>${pos.entry_price.toFixed(2)}</p>
                                       </div>
                                       <div className="text-right">
-                                          <p className="text-[10px] font-mono text-zinc-500 uppercase">Mark Price</p>
-                                          <p className="text-sm font-mono text-zinc-300">{markPrice ? `$${markPrice.toFixed(2)}` : '--'}</p>
+                                          <p className="text-[10px] font-mono uppercase" style={{ color: theme.panelTextDim }}>Mark Price</p>
+                                          <p className="text-sm font-mono" style={{ color: theme.panelText }}>{markPrice ? `$${markPrice.toFixed(2)}` : '--'}</p>
                                       </div>
                                       
-                                      <div className="pt-2 border-t border-zinc-800/50">
-                                          <p className="text-[10px] font-mono text-zinc-500 uppercase">Take Profit</p>
-                                          <p className="text-sm font-mono text-emerald-400">
+                                      <div className="pt-2" style={{ borderTop: `1px solid ${theme.panelBorder}50` }}>
+                                          <p className="text-[10px] font-mono uppercase" style={{ color: theme.panelTextDim }}>Take Profit</p>
+                                          <p className="text-sm font-mono" style={{ color: theme.priceUp }}>
                                               {pos.tp_price ? `$${pos.tp_price.toFixed(2)}` : 'None'}
                                           </p>
                                       </div>
-                                      <div className="pt-2 border-t border-zinc-800/50 text-right">
-                                          <p className="text-[10px] font-mono text-zinc-500 uppercase">Stop Loss</p>
-                                          <p className="text-sm font-mono text-red-400">
+                                      <div className="pt-2 text-right" style={{ borderTop: `1px solid ${theme.panelBorder}50` }}>
+                                          <p className="text-[10px] font-mono uppercase" style={{ color: theme.panelTextDim }}>Stop Loss</p>
+                                          <p className="text-sm font-mono" style={{ color: theme.priceDown }}>
                                               {pos.sl_price ? `$${pos.sl_price.toFixed(2)}` : 'None'}
                                           </p>
                                       </div>
@@ -687,7 +1058,8 @@ export default function LightweightChartDashboard() {
 
                                   <button 
                                       onClick={() => closePosition(pos)}
-                                      className="w-full bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-mono text-xs py-2 rounded-lg border border-zinc-700 transition-colors"
+                                      className="w-full font-mono text-xs py-2 rounded-lg transition-colors"
+                                      style={{ background: theme.panelBorder, color: theme.panelText, border: `1px solid ${theme.panelBorder}` }}
                                   >
                                       Close Position
                                   </button>

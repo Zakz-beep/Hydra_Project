@@ -30,8 +30,11 @@ import yfinance as yf
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
  
-from Greeks import OptionsInventoryEngine
-from greeks_db import greeks_db
+from Greeks import OptionsInventoryEngine, bsm_greeks, RISK_FREE_RATE, _find_gamma_flip
+from greeks_db import greeks_db, ACTIVE_FEED
+from greeks_chart_data import chart_payload
+from greeks_levels import scoped_levels, inventory_rows, expiry_pain
+from alpaca_options import provider_status, OptionsDataError
 
 # ═══════════════════════════════════════════════
 # APP INIT
@@ -42,7 +45,7 @@ app = FastAPI(
     description=(
         "GEX · Vanna · Charm · DAI · VEX — "
         "Options Greeks aggregate per expiry bucket (0DTE–30DTE). "
-        "Data: yfinance (live) dengan synthetic fallback."
+        "Data: Alpaca options + dated contract OI; indicative feed is not executable OPRA."
     ),
     version="1.0.0",
 )
@@ -60,29 +63,76 @@ app.add_middleware(
 # ═══════════════════════════════════════════════
 
 import threading
+from options_workspace import router as contract_workspace_router
+app.include_router(contract_workspace_router)
+from marketdata_history import router as marketdata_history_router
+app.include_router(marketdata_history_router)
 
 _engines:  dict[str, OptionsInventoryEngine] = {}
 _cache:    dict[str, dict] = {}          # ticker → last result
 _cache_ts: dict[str, float] = {}        # ticker → timestamp
 _warming:  set[str] = set()             # tickers being background-warmed
 CACHE_TTL  = 180  # detik — 3 menit (options OI tidak berubah per detik)
+_locks: dict[str, threading.Lock] = {}
+_cache_guard = threading.Lock()
+_refresh_errors: dict[str, str] = {}
+
+
+def _compute_snapshot(ticker: str, requested_at: float) -> dict:
+    # Serialize work per ticker, and let simultaneous requests share the result.
+    with _cache_guard:
+        lock = _locks.setdefault(ticker, threading.Lock())
+    with lock:
+        if ticker in _cache and _cache_ts[ticker] >= requested_at:
+            return _cache[ticker]
+        try:
+            engine = _engines.setdefault(ticker, OptionsInventoryEngine(ticker=ticker))
+            result = engine.compute_dict()
+        except OptionsDataError as exc:
+            _refresh_errors[ticker] = str(exc)
+            if ticker in _cache:
+                return _cache[ticker]
+            raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+        except Exception as exc:
+            _refresh_errors[ticker] = "Refresh gagal; snapshot terakhir tetap ditampilkan."
+            if ticker in _cache:
+                return _cache[ticker]
+            raise HTTPException(status_code=502, detail="Sumber data Greeks tidak dapat dimuat. Coba lagi.") from exc
+        _refresh_errors.pop(ticker, None)
+        # Persist once per computation, never on every cached GET. Synthetic
+        # chains must not contaminate historical signals or their backtests.
+        if result.get("data_source") == "live" and result.get('provenance', {}).get('feed') == ACTIVE_FEED:
+            try:
+                greeks_db.insert_snapshot(result)
+                greeks_db.detect_and_log_changes(
+                    ticker=result["ticker"], spot=result["spot"],
+                    gex=result.get("total_net_gex", 0), signals=result.get("signals", {}),
+                )
+            except Exception:
+                result = {**result, "persistence_warning": "Snapshot tersedia, tetapi penyimpanan histori gagal."}
+        _cache[ticker] = result
+        _cache_ts[ticker] = time.time()
+        return result
+
+
+def _schedule_warm(ticker: str) -> bool:
+    with _cache_guard:
+        if ticker in _warming:
+            return False
+        _warming.add(ticker)
+    threading.Thread(target=_warm_ticker_bg, args=(ticker,), daemon=True).start()
+    return True
 
 
 def _warm_ticker_bg(ticker: str) -> None:
     """Background thread: compute options engine for ticker, populate cache."""
-    if ticker in _warming:
-        return
-    _warming.add(ticker)
     try:
-        if ticker not in _engines:
-            _engines[ticker] = OptionsInventoryEngine(ticker=ticker)
-        result = _engines[ticker].compute_dict()
-        _cache[ticker]    = result
-        _cache_ts[ticker] = time.time()
+        _compute_snapshot(ticker, time.time())
     except Exception:
         pass
     finally:
-        _warming.discard(ticker)
+        with _cache_guard:
+            _warming.discard(ticker)
 
 
 def _get_snapshot(ticker: str, force: bool = False) -> dict:
@@ -93,6 +143,11 @@ def _get_snapshot(ticker: str, force: bool = False) -> dict:
     Stale-while-revalidate: kalau cache ada tapi expired,
     return stale data segera + trigger background refresh.
     """
+    ticker = ticker.strip().upper()
+    if provider_status()['feed'] != ACTIVE_FEED:
+        raise HTTPException(503, detail='Alpaca feed setting changed. Restart the Greeks server to select the matching archive; feeds must not be mixed.')
+    if not ticker or len(ticker) > 24 or not all(c.isalnum() or c in "^=.-" for c in ticker):
+        raise HTTPException(status_code=422, detail="Ticker tidak valid.")
     now = time.time()
     is_fresh = (
         ticker in _cache
@@ -100,28 +155,21 @@ def _get_snapshot(ticker: str, force: bool = False) -> dict:
     )
 
     if not force and is_fresh:
-        return _cache[ticker]
+        result = _cache[ticker]
 
     # Kalau ada stale cache tapi tidak force → return stale + revalidate bg
-    if not force and ticker in _cache and ticker not in _warming:
-        threading.Thread(target=_warm_ticker_bg, args=(ticker,), daemon=True).start()
-        return _cache[ticker]  # return stale immediately
-
-    # No cache OR force=True → blocking compute
-    if ticker not in _engines:
-        _engines[ticker] = OptionsInventoryEngine(ticker=ticker)
-
-    try:
-        result = _engines[ticker].compute_dict()
-    except Exception as e:
-        # Kalau ada stale, return stale daripada error
-        if ticker in _cache:
-            return _cache[ticker]
-        raise HTTPException(status_code=500, detail=f"Engine error: {e}")
-
-    _cache[ticker]    = result
-    _cache_ts[ticker] = now
-    return result
+    elif not force and ticker in _cache:
+        _schedule_warm(ticker)
+        result = _cache[ticker]
+    else:
+        result = _compute_snapshot(ticker, now)
+    age = max(0, time.time() - _cache_ts.get(ticker, now))
+    return {**result, "cache": {
+        "age_seconds": round(age, 1), "ttl_seconds": CACHE_TTL,
+        "stale": age >= CACHE_TTL or ticker in _refresh_errors,
+        "refreshing": ticker in _warming,
+        "refresh_error": _refresh_errors.get(ticker),
+    }}
 
 
 # ═══════════════════════════════════════════════
@@ -146,6 +194,7 @@ def _strip_strikes(by_expiry: dict) -> dict:
 def health():
     return {
         "status":  "ok",
+        "options_provider": provider_status(),
         "service": "Options Inventory Engine API",
         "version": "1.0.0",
         "docs":    "/docs",
@@ -187,7 +236,7 @@ def warm_cache(ticker: str = Query(default="SPY")):
         return {"status": "already_cached", "ticker": t}
     if t in _warming:
         return {"status": "warming", "ticker": t}
-    threading.Thread(target=_warm_ticker_bg, args=(t,), daemon=True).start()
+    _schedule_warm(t)
     return {"status": "warming_started", "ticker": t}
 
 
@@ -208,17 +257,6 @@ def get_greeks(
     [DB] Otomatis persist snapshot + detect signal changes.
     """
     result = _get_snapshot(ticker.upper(), force=force)
-
-    # ── Persist ke DB ────────────────────────────────
-    greeks_db.insert_snapshot(result)
-
-    # ── Auto-detect signal changes ───────────────────
-    greeks_db.detect_and_log_changes(
-        ticker=result["ticker"],
-        spot=result["spot"],
-        gex=result.get("total_net_gex", 0),
-        signals=result.get("signals", {}),
-    )
 
     return result
 
@@ -241,6 +279,7 @@ def get_greeks_summary(
         "ticker":           snap["ticker"],
         "spot":             snap["spot"],
         "data_source":      snap["data_source"],
+        "provenance":       snap.get("provenance", {}),
         "total_net_gex":    snap["total_net_gex"],
         "total_net_vanna":  snap["total_net_vanna"],
         "total_net_charm":  snap["total_net_charm"],
@@ -298,6 +337,7 @@ def get_gex(
         "ticker":        snap["ticker"],
         "spot":          snap["spot"],
         "data_source":   snap["data_source"],
+        "provenance":    snap.get("provenance", {}),
         "total_net_gex": snap["total_net_gex"],
         "gex_regime":    snap["gex_regime"],
         "gamma_flip":    snap["gamma_flip"],
@@ -420,6 +460,16 @@ def get_signals(
     }
 
 
+@app.get("/api/greeks/levels")
+def get_scoped_levels(ticker: str = Query(default="SPY"), expiries: Optional[str] = Query(default=None, max_length=1000), snapshot: Optional[str] = Query(default=None)):
+    snap = _get_snapshot(ticker.upper())
+    if snapshot and snapshot != snap['timestamp']:
+        raise HTTPException(409, 'Snapshot changed. Refresh the dashboard snapshot to align levels.')
+    try:
+        return scoped_levels(snap, expiries.split(',') if expiries else None)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+
 # ── 7. MAX PAIN PER BUCKET ───────────────────────────────
 
 @app.get("/api/greeks/maxpain")
@@ -428,9 +478,8 @@ def get_maxpain(
     force:  bool = Query(default=False),
 ):
     """
-    Max Pain levels per expiry bucket.
-    Max Pain = strike di mana total kerugian options buyers paling besar
-    (titik gravitasi harga menjelang expiry).
+    Minimum fixed-OI intrinsic payout per actual expiry, not a price forecast.
+    Legacy buckets with multiple settlement dates have no single max pain.
     """
     snap = _get_snapshot(ticker.upper(), force=force)
 
@@ -451,6 +500,7 @@ def get_maxpain(
         "ticker":    snap["ticker"],
         "spot":      snap["spot"],
         "by_expiry": maxpain_data,
+        "by_actual_expiry": expiry_pain(inventory_rows(snap), snap['spot']),
     }
 
 
@@ -467,8 +517,8 @@ def get_vanna_charm(
       - Charm: dDelta/dTime → prediksi delta decay harian (relevan menjelang OPEX)
     """
     snap = _get_snapshot(ticker.upper(), force=force)
-
     vc_data = {}
+    all_strikes = []
     for bk, inv in snap.get("by_expiry", {}).items():
         vc_data[bk] = {
             "dte_bucket":   inv.get("dte_bucket"),
@@ -479,12 +529,10 @@ def get_vanna_charm(
             "gross_charm":  inv.get("gross_charm"),
             "net_dai":      inv.get("net_dai"),
         }
+        for s in inv.get("strikes", []):
+            all_strikes.append(s)
 
     # Top vanna strikes
-    all_strikes = []
-    for inv in snap.get("by_expiry", {}).values():
-        all_strikes.extend(inv.get("strikes", []))
-
     top_vanna = sorted(all_strikes, key=lambda x: abs(x.get("vanna_exp", 0)), reverse=True)[:15]
     top_charm = sorted(all_strikes, key=lambda x: abs(x.get("charm_exp", 0)), reverse=True)[:15]
 
@@ -506,9 +554,302 @@ def get_vanna_charm(
     }
 
 
+# ── 9. SIMULATOR ─────────────────────────────────────────
+
+class SimStrike:
+    # helper for gamma flip
+    def __init__(self, strike, gex_spotgamma):
+        self.strike = strike
+        self.gex_spotgamma = gex_spotgamma
+
+@app.get("/api/greeks/simulate")
+def simulate_greeks(
+    ticker: str = Query(default="SPY"),
+    spot_shift_pct: float = Query(default=0.0, description="Shift spot e.g. 0.05 for +5%"),
+    iv_shift_pct: float = Query(default=0.0, description="Shift IV e.g. -0.10 for -10%"),
+    days_forward: int = Query(default=0, description="Days to shift forward"),
+    force: bool = Query(default=False)
+):
+    """
+    Gamma, Vanna, and Charm Profile Scenario Simulator.
+    Re-calculates BSM Greeks for all strikes based on shifted Spot, IV, and DTE.
+    """
+    snap = _get_snapshot(ticker.upper(), force=force)
+    orig_spot = snap["spot"]
+    new_spot  = orig_spot * (1 + spot_shift_pct / 100.0)
+
+    total_orig_gex   = 0.0
+    total_sim_gex    = 0.0
+    total_orig_vanna = 0.0
+    total_sim_vanna  = 0.0
+    total_orig_charm = 0.0
+    total_sim_charm  = 0.0
+
+    simulated_strikes = []
+
+    for bk, inv in snap.get("by_expiry", {}).items():
+        for s in inv.get("strikes", []):
+            strike      = s["strike"]
+            option_type = s["option_type"]
+            oi          = s["oi"]
+            orig_gex    = s["gex_spotgamma"]
+            orig_vanna  = s.get("vanna_exp", 0.0)
+            orig_charm  = s.get("charm_exp", 0.0)
+
+            orig_dte = s["dte"]
+            orig_iv  = s["iv"]
+
+            new_dte = max(orig_dte - days_forward, 0.001)
+            new_T   = new_dte / 365.0
+            new_iv  = max(orig_iv * (1 + iv_shift_pct / 100.0), 0.01)
+
+            # re-run BSM with shifted params
+            g = bsm_greeks(new_spot, strike, new_T, RISK_FREE_RATE, new_iv, option_type)
+
+            sign     = 1.0 if option_type == "call" else -1.0
+            notional = oi * 100  # CONTRACT_SIZE
+
+            sim_gex   = sign * g["gamma"] * notional * (new_spot ** 2) / 1e9
+            sim_vanna = sign * g["vanna"]  * notional
+            sim_charm = sign * g["charm"]  * notional
+
+            simulated_strikes.append({
+                "strike":      strike,
+                "option_type": option_type,
+                "orig_gex":    orig_gex,
+                "sim_gex":     round(sim_gex, 6),
+                "orig_vanna":  orig_vanna,
+                "sim_vanna":   round(sim_vanna, 6),
+                "orig_charm":  orig_charm,
+                "sim_charm":   round(sim_charm, 6),
+            })
+
+            total_orig_gex   += orig_gex
+            total_sim_gex    += sim_gex
+            total_orig_vanna += orig_vanna
+            total_sim_vanna  += sim_vanna
+            total_orig_charm += orig_charm
+            total_sim_charm  += sim_charm
+
+    # Aggregate by strike for the chart
+    agg_strikes = {}
+    for s in simulated_strikes:
+        k = s["strike"]
+        if k not in agg_strikes:
+            agg_strikes[k] = {
+                "strike":     k,
+                "orig_gex":   0.0, "sim_gex":   0.0,
+                "orig_vanna": 0.0, "sim_vanna": 0.0,
+                "orig_charm": 0.0, "sim_charm": 0.0,
+            }
+        agg_strikes[k]["orig_gex"]   += s["orig_gex"]
+        agg_strikes[k]["sim_gex"]    += s["sim_gex"]
+        agg_strikes[k]["orig_vanna"] += s["orig_vanna"]
+        agg_strikes[k]["sim_vanna"]  += s["sim_vanna"]
+        agg_strikes[k]["orig_charm"] += s["orig_charm"]
+        agg_strikes[k]["sim_charm"]  += s["sim_charm"]
+
+    chart_data = sorted(list(agg_strikes.values()), key=lambda x: x["strike"])
+    for d in chart_data:
+        d["orig_gex"]   = round(d["orig_gex"],   6)
+        d["sim_gex"]    = round(d["sim_gex"],    6)
+        d["orig_vanna"] = round(d["orig_vanna"], 4)
+        d["sim_vanna"]  = round(d["sim_vanna"],  4)
+        d["orig_charm"] = round(d["orig_charm"], 4)
+        d["sim_charm"]  = round(d["sim_charm"],  4)
+
+    flip_candidates = [SimStrike(d["strike"], d["sim_gex"]) for d in chart_data]
+    new_gamma_flip  = _find_gamma_flip(flip_candidates, new_spot)
+
+    return {
+        "timestamp":         snap["timestamp"],
+        "ticker":            snap["ticker"],
+        "orig_spot":         orig_spot,
+        "new_spot":          round(new_spot, 2),
+        "total_orig_gex":    round(total_orig_gex,   4),
+        "total_sim_gex":     round(total_sim_gex,    4),
+        "total_orig_vanna":  round(total_orig_vanna, 4),
+        "total_sim_vanna":   round(total_sim_vanna,  4),
+        "total_orig_charm":  round(total_orig_charm, 4),
+        "total_sim_charm":   round(total_sim_charm,  4),
+        "orig_gamma_flip":   snap["gamma_flip"],
+        "sim_gamma_flip":    new_gamma_flip,
+        "chart_data":        chart_data,
+    }
+
+
+@app.get("/api/greeks/bsm")
+def simulate_single_bsm(
+    spot: float = Query(..., description="Underlying spot price"),
+    strike: float = Query(..., description="Option strike price"),
+    dte: float = Query(..., description="Days to expiry"),
+    iv: float = Query(..., description="Implied Volatility (decimal, e.g. 0.15 for 15%)"),
+    option_type: str = Query(default="call", description="call or put"),
+):
+    """
+    Kalkulator BSM Murni untuk Single Option Simulator.
+    Mengembalikan nilai First-Order Greeks (Delta, Gamma, Theta, Vega, Rho) + Vanna/Charm.
+    """
+    T = max(dte, 0.001) / 365.0
+    r = RISK_FREE_RATE
+    g = bsm_greeks(spot, strike, T, r, iv, option_type.lower())
+    
+    # We round them for cleaner JSON responses
+    return {
+        "price": round(g.get("price", 0.0), 4),
+        "delta": round(g["delta"], 6),
+        "gamma": round(g["gamma"], 8),
+        "theta": round(g["theta"], 6),
+        "vega": round(g["vega"], 6),
+        "rho": round(g["rho"], 6),
+        "vanna": round(g["vanna"], 8),
+        "charm": round(g["charm"], 8),
+    }
+
+@app.get("/api/greeks/bsm/curve")
+def simulate_bsm_curve(
+    spot: float = Query(..., description="Underlying spot price"),
+    strike: float = Query(..., description="Option strike price"),
+    dte: float = Query(..., description="Days to expiry"),
+    iv: float = Query(..., description="Implied Volatility (decimal, e.g. 0.15 for 15%)"),
+    option_type: str = Query(default="call", description="call or put"),
+    range_pct: float = Query(default=0.15, description="+/- range for spot price curve (e.g. 0.15 = 15%)"),
+    steps: int = Query(default=50, description="Number of data points"),
+):
+    """
+    Menghasilkan data kurva First dan Second Order Greeks untuk rentang harga Spot.
+    Berguna untuk memvisualisasikan bagaimana Greeks berubah saat harga saham bergerak.
+    """
+    T = max(dte, 0.001) / 365.0
+    r = RISK_FREE_RATE
+    
+    min_spot = spot * (1.0 - range_pct)
+    max_spot = spot * (1.0 + range_pct)
+    step_size = (max_spot - min_spot) / max(steps - 1, 1)
+    
+    curve = []
+    current_spot = min_spot
+    for _ in range(steps):
+        g = bsm_greeks(current_spot, strike, T, r, iv, option_type.lower())
+        curve.append({
+            "spot": round(current_spot, 2),
+            "price": round(g.get("price", 0.0), 4),
+            "delta": round(g["delta"], 4),
+            "gamma": round(g["gamma"], 6),
+            "theta": round(g["theta"], 4),
+            "vega": round(g["vega"], 4),
+            "rho": round(g["rho"], 4),
+            "vanna": round(g["vanna"], 6),
+            "charm": round(g["charm"], 6),
+        })
+        current_spot += step_size
+        
+    return {
+        "strike": strike,
+        "base_spot": spot,
+        "dte": dte,
+        "iv": iv,
+        "curve": curve
+    }
+
+
 # ═══════════════════════════════════════════════
 # ENDPOINTS — DB-POWERED (SQLite)
 # ═══════════════════════════════════════════════
+
+@app.get("/api/greeks/provider")
+def get_options_provider():
+    return {**provider_status(), 'history_dataset': 'alpaca feed-specific archive',
+            'limitations': ['Indicative trades delayed; quotes modified.', 'No index-option substitution: use a supported US equity/ETF underlying.', 'Yahoo daily index/ETF holdings research remains a separate source.']}
+
+
+@app.get("/api/greeks/vvix")
+def get_vvix_replication():
+    raise HTTPException(501, detail='VVIX replication unavailable in the Alpaca equity/ETF options adapter. VIX index options are not replaced with ETF options or fabricated values.')
+
+
+def legacy_yahoo_history(ticker, n, from_ts=None, to_ts=None):
+    """Read existing archive without modifying, relabelling or migrating its prices."""
+    import sqlite3
+    import json
+    from pathlib import Path
+    path = Path(__file__).with_name('data') / 'greeks.db'
+    if not path.is_file(): return []
+    where, params = ['ticker = ?'], [ticker]
+    if from_ts: where.append('timestamp >= ?'); params.append(from_ts)
+    if to_ts: where.append('timestamp <= ?'); params.append(to_ts)
+    params.append(n)
+    connection = sqlite3.connect(path.as_uri()+'?mode=ro', uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute('SELECT * FROM greeks_snapshots WHERE '+' AND '.join(where)+' ORDER BY timestamp DESC LIMIT ?', params).fetchall()
+    finally:
+        connection.close()
+    result=[]
+    for row in reversed(rows):
+        item=dict(row)
+        item['signals']=json.loads(item.pop('signals_json', '{}'))
+        item['provenance']={'provider':'yahoo', 'feed':'legacy archive; original quality label retained'}
+        result.append(item)
+    return result
+@app.get("/api/greeks/unusual-activity")
+def get_unusual_activity(ticker: str = Query(default="SPY"), min_volume: int = Query(default=100, ge=0),
+                         vol_oi_ratio: float = Query(default=1.5, ge=0), force: bool = Query(default=False)):
+    """Volume/OI research; aggregate bars cannot identify aggressors, sweeps or blocks."""
+    snap = _get_snapshot(ticker.upper(), force=force)
+    activities=[]
+    for inv in snap.get('by_expiry', {}).values():
+        for row in inv.get('strikes', []):
+            volume, oi = row.get('volume'), row.get('oi')
+            if volume is None or not oi or volume < min_volume: continue
+            ratio=volume/oi
+            if ratio < vol_oi_ratio: continue
+            activities.append({'contract_symbol':row.get('contract_symbol'), 'strike':row['strike'],
+                'expiry':row['expiry'], 'dte':row['dte'], 'option_type':row['option_type'].upper(),
+                'volume':volume, 'oi':oi, 'oi_date':row.get('oi_date'), 'ratio':round(ratio,2),
+                'mid_price':row['mid_price'], 'premium':round(volume*100*row['mid_price'],2),
+                'sentiment':'UNKNOWN', 'activity_type':'Unusual volume', 'iv':round(row['iv']*100,2),
+                'dist_pct':round((row['strike']/snap['spot']-1)*100,2)})
+    activities.sort(key=lambda row:row['ratio'], reverse=True)
+    return {'ticker':snap['ticker'], 'spot':snap['spot'], 'timestamp':snap['timestamp'],
+            'count':len(activities), 'activities':activities[:100], 'provenance':snap.get('provenance', {}),
+            'flow_basis':'Alpaca daily bar volume / dated OI; no aggressor, sweep, block or opening/closing identification.',
+            'premium_basis':'Volume × current indicative midpoint × 100 is a notional proxy, not traded premium.',
+            'cache':snap.get('cache')}
+@app.get("/api/greeks/oi-change")
+def get_greeks_oi_change(ticker: str = Query(default="SPY")):
+    """
+    Mengambil perubahan (delta) OI dari ~24 jam yang lalu.
+    Berguna untuk mendeteksi 'Smart Money' entry/exit.
+    """
+    t = ticker.upper()
+    try:
+        data = greeks_db.get_oi_change(t)
+        return {"ticker": t, "oi_changes": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch OI change: {e}")
+
+@app.get("/api/greeks/chart-data")
+def get_chart_greeks_data(
+    ticker: str = Query(default="SPY", min_length=1, max_length=30, pattern=r"^[A-Za-z0-9.^=-]+$"),
+    history_limit: int = Query(default=300, ge=1, le=500),
+):
+    """Snapshot, normalized chain and UTC aggregate history for editable Python indicators."""
+    from Greeks import CONTRACT_SIZE
+    t = ticker.upper()
+    snapshot = _get_snapshot(t)
+    history = greeks_db.get_snapshot_history(t, n=history_limit)
+    warnings = []
+    try:
+        changes = greeks_db.get_oi_change(t)
+    except Exception:
+        changes = []
+        warnings.append("OI comparison unavailable; current chain and aggregate history remain available.")
+    result = chart_payload(snapshot, history, changes, time.time(), CONTRACT_SIZE, RISK_FREE_RATE)
+    result["meta"]["warnings"] = snapshot.get('provenance', {}).get('warnings', []) + warnings
+    result["meta"]["provenance"] = snapshot.get('provenance', {})
+    return result
+
 
 @app.get("/api/greeks/history")
 def get_greeks_history(
@@ -516,10 +857,14 @@ def get_greeks_history(
     n:      int = Query(default=50, ge=1, le=500),
     from_ts: Optional[str] = Query(default=None, description="ISO8601, e.g. 2024-11-01T00:00:00"),
     to_ts:   Optional[str] = Query(default=None),
+    dataset: str = Query(default='current', pattern='^(current|legacy-yahoo)$'),
 ):
     """[DB] History of Greeks snapshots. Oldest first for charting."""
-    history = greeks_db.get_snapshot_history(ticker.upper(), n=n, from_ts=from_ts, to_ts=to_ts)
-    return {"ticker": ticker, "n": len(history), "history": history}
+    if dataset == 'legacy-yahoo':
+        history = legacy_yahoo_history(ticker.upper(), n, from_ts, to_ts)
+    else:
+        history = greeks_db.get_snapshot_history(ticker.upper(), n=n, from_ts=from_ts, to_ts=to_ts)
+    return {"ticker": ticker, "n": len(history), "history": history, 'dataset': dataset, 'provider': provider_status() if dataset=='current' else {'provider':'yahoo', 'feed':'legacy archive'}}
 
 
 @app.get("/api/greeks/gex/timeseries")
@@ -1029,7 +1374,7 @@ def get_unusual_flow(
         dte = bucket.get("dte_bucket", 0)
         strikes = bucket.get("strikes", [])
         for s in strikes:
-            vol = s.get("volume", 0) or 0
+            vol = s.get("volume") or 0
             oi  = s.get("oi", 0) or 0
             iv  = s.get("iv", 0) or 0
             strike = s.get("strike", 0)
@@ -1056,7 +1401,7 @@ def get_unusual_flow(
             is_otm = moneyness_pct > 3.0
 
             # Sentiment: call = bullish, put = bearish
-            sentiment = "BULL" if otype == "call" else "BEAR"
+            sentiment = "UNKNOWN"  # Aggregate volume does not reveal trade direction.
 
             # Signal score (higher = more unusual)
             score = ratio * math.log1p(vol)
@@ -1067,7 +1412,7 @@ def get_unusual_flow(
                 "ticker":         t,
                 "type":           otype.upper(),
                 "strike":         strike,
-                "expiry_dte":     int(dte),
+                "expiry_dte":     int(s.get("dte", dte)),
                 "volume":         int(vol),
                 "open_interest":  int(oi),
                 "vol_oi_ratio":   round(ratio, 2),
@@ -1087,6 +1432,8 @@ def get_unusual_flow(
         "timestamp": snap.get("timestamp", ""),
         "count":     len(flows[:top_n]),
         "flows":     flows[:top_n],
+        "provenance": snap.get("provenance", {}),
+        "flow_basis": "Daily aggregate volume / dated OI; aggressor and opening/closing status unknown.",
     }
 
 
@@ -1094,6 +1441,11 @@ def get_unusual_flow(
 # RUN
 # ═══════════════════════════════════════════════
 
+from greeks_market_research import create_research_router
+app.include_router(create_research_router(_get_snapshot))
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("greeks_api:app", host="0.0.0.0", port=8001, reload=True)
+
+

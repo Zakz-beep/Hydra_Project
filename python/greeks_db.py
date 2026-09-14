@@ -30,6 +30,7 @@ import sqlite3
 import os
 import json
 import threading
+from alpaca_options import provider_status
 from datetime import datetime, timedelta
 from typing import Optional
 from contextlib import contextmanager
@@ -40,7 +41,10 @@ from contextlib import contextmanager
 # ════════════════════════════════════════════════════════
 
 DB_DIR  = os.path.join(os.path.dirname(__file__), "data")
-DB_PATH = os.path.join(DB_DIR, "greeks.db")
+ACTIVE_FEED = provider_status()['feed']
+if ACTIVE_FEED not in ('indicative', 'opra'):
+    ACTIVE_FEED = 'indicative'
+DB_PATH = os.environ.get('GREEKS_DB_PATH', os.path.join(DB_DIR, f"greeks_alpaca_{ACTIVE_FEED}.db"))
 
 
 # ════════════════════════════════════════════════════════
@@ -71,7 +75,8 @@ CREATE TABLE IF NOT EXISTS greeks_snapshots (
     gamma_flip      REAL,                            -- bisa NULL
 
     -- Signals summary (JSON)
-    signals_json    TEXT    NOT NULL DEFAULT '{}'
+    signals_json    TEXT    NOT NULL DEFAULT '{}',
+    provenance_json TEXT    NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_greeks_ticker_ts
@@ -167,7 +172,7 @@ CREATE TABLE IF NOT EXISTS greeks_strike_archive (
     expiry          TEXT    NOT NULL,
     dte             INTEGER NOT NULL,
     oi              INTEGER NOT NULL DEFAULT 0,
-    volume          INTEGER NOT NULL DEFAULT 0,
+    volume          INTEGER,
     iv              REAL    NOT NULL DEFAULT 0,
     delta           REAL    NOT NULL DEFAULT 0,
     gamma           REAL    NOT NULL DEFAULT 0,
@@ -219,7 +224,7 @@ class GreeksDatabase:
     def _conn(self):
         """Context manager: buka koneksi, commit, tutup. Thread-safe via lock."""
         with self._lock:
-            conn = getattr(self, "_mem_conn", None) or sqlite3.connect(self._path, check_same_thread=False)
+            conn = getattr(self, "_mem_conn", None) or sqlite3.connect(self._path, check_same_thread=False, timeout=30.0)
             conn.row_factory = sqlite3.Row
             if self._path != ":memory:":
                 conn.execute("PRAGMA journal_mode=WAL")
@@ -253,6 +258,8 @@ class GreeksDatabase:
                     columns = [row["name"] for row in cur.fetchall()]
                     if "total_gross_gex" not in columns:
                         conn.execute("ALTER TABLE greeks_snapshots ADD COLUMN total_gross_gex REAL NOT NULL DEFAULT 0;")
+                    if "provenance_json" not in columns:
+                        conn.execute("ALTER TABLE greeks_snapshots ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}';")
                         
                     # 2. greeks_expiry_inventory
                     cur.execute("PRAGMA table_info(greeks_expiry_inventory)")
@@ -267,7 +274,7 @@ class GreeksDatabase:
     # FEATURE 1: Persistent Snapshots
     # ─────────────────────────────────────────────────
 
-    def insert_snapshot(self, result: dict, archive_top_n: int = 20) -> int:
+    def insert_snapshot(self, result: dict, archive_top_n: int = 50) -> int:
         """
         Insert satu Greeks snapshot ke DB.
         Return snapshot row id.
@@ -285,8 +292,8 @@ class GreeksDatabase:
                     (timestamp, ticker, spot, data_source,
                      total_net_gex, total_net_vanna, total_net_charm,
                      total_net_dai, total_net_vex, total_gross_gex,
-                     gex_regime, gamma_flip, signals_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     gex_regime, gamma_flip, signals_json, provenance_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 result.get("timestamp", datetime.now().isoformat()),
                 result["ticker"],
@@ -301,6 +308,7 @@ class GreeksDatabase:
                 result.get("gex_regime", "neutral"),
                 result.get("gamma_flip"),
                 json.dumps(result.get("signals", {})),
+                json.dumps(result.get("provenance", {})),
             ))
             snap_id = cur.lastrowid
 
@@ -410,7 +418,7 @@ class GreeksDatabase:
                 SELECT timestamp, ticker, spot, data_source,
                        total_net_gex, total_net_vanna, total_net_charm,
                        total_net_dai, total_net_vex, total_gross_gex,
-                       gex_regime, gamma_flip, signals_json
+                       gex_regime, gamma_flip, signals_json, provenance_json
                 FROM greeks_snapshots
                 WHERE {where}
                 ORDER BY timestamp DESC
@@ -421,6 +429,7 @@ class GreeksDatabase:
         result = []
         for r in reversed(rows):
             d = dict(r)
+            d['provenance'] = json.loads(d.pop('provenance_json', '{}'))
             # Parse signals JSON
             try:
                 d["signals"] = json.loads(d.pop("signals_json", "{}"))
@@ -788,6 +797,83 @@ class GreeksDatabase:
             "by_horizon":       by_horizon,
             "by_signal_value":  by_signal,
         }
+
+    def get_oi_change(self, ticker: str) -> list[dict]:
+        """
+        Hitung perubahan (delta) OI dan Volume antara snapshot terbaru
+        dan snapshot dari ~24 jam yang lalu (atau snapshot tertua hari ini).
+        """
+        with self._conn() as conn:
+            # 1. Ambil snapshot terbaru (new)
+            snap_new = conn.execute("""
+                SELECT id, timestamp FROM greeks_snapshots
+                WHERE ticker = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (ticker,)).fetchone()
+
+            if not snap_new:
+                return []
+            
+            # 2. Cari snapshot ~24 jam yang lalu
+            target_time = datetime.fromisoformat(snap_new["timestamp"]) - timedelta(days=1)
+            target_time_str = target_time.isoformat()
+            
+            # Cari yang terdekat sebelum atau sesudah 24 jam lalu
+            snap_old = conn.execute("""
+                SELECT id, timestamp FROM greeks_snapshots
+                WHERE ticker = ? AND timestamp <= ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (ticker, target_time_str)).fetchone()
+            
+            if not snap_old:
+                # Fallback: ambil snapshot tertua yang ada jika blm ada data 24 jam
+                snap_old = conn.execute("""
+                    SELECT id, timestamp FROM greeks_snapshots
+                    WHERE ticker = ?
+                    ORDER BY timestamp ASC
+                    LIMIT 1
+                """, (ticker,)).fetchone()
+            
+            if not snap_old or snap_old["id"] == snap_new["id"]:
+                return [] # Belum ada history untuk dicompare
+
+            id_new = snap_new["id"]
+            id_old = snap_old["id"]
+
+            # 3. Join archive data
+            rows = conn.execute("""
+                SELECT 
+                    n.strike,
+                    n.option_type,
+                    n.expiry,
+                    n.dte,
+                    n.dte_bucket,
+                    n.oi AS oi_new,
+                    o.oi AS oi_old,
+                    (n.oi - o.oi) AS delta_oi,
+                    n.volume AS volume_new,
+                    o.volume AS volume_old,
+                    (n.volume - o.volume) AS delta_volume,
+                    n.iv AS iv_new,
+                    n.gex_spotgamma AS gex_new,
+                    n.vanna_exp AS vanna_new,
+                    n.charm_exp AS charm_new
+                FROM greeks_strike_archive n
+                JOIN greeks_strike_archive o 
+                  ON n.strike = o.strike 
+                 AND n.option_type = o.option_type
+                 AND n.expiry = o.expiry
+                WHERE n.snapshot_id = ? AND o.snapshot_id = ?
+                ORDER BY ABS(n.oi - o.oi) DESC
+            """, (id_new, id_old)).fetchall()
+            
+        result = []
+        for r in rows:
+            result.append(dict(r))
+            
+        return result
 
     # ─────────────────────────────────────────────────
     # Utility

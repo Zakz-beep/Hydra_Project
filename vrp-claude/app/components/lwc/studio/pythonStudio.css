@@ -1,0 +1,31 @@
+.chart-studio .cs-python{height:410px;min-height:260px;max-height:72%}
+.cs-python .cs-editor-toolbar{height:auto;min-height:44px;flex-shrink:0;flex-wrap:wrap;padding:6px 12px}
+.cs-python .cs-editor-actions{flex-wrap:wrap;justify-content:flex-end}
+.chart-studio .cs-python .cs-editor-actions>button{display:inline-flex}
+.cs-language-badge{font:11px ui-monospace,monospace!important;background:var(--cs-raised)!important;border:1px solid var(--cs-border)!important;padding:4px 6px!important;color:var(--cs-gold)!important}
+.cs-language-strip{display:flex;justify-content:space-between;gap:12px;padding:6px 12px;border-bottom:1px solid var(--cs-border);color:var(--cs-muted);font:10px ui-monospace,monospace;flex-shrink:0}
+.cs-language-strip b{color:var(--cs-text);font-weight:500}
+.chart-studio .cs-syntax-check{border:1px solid var(--cs-border);color:var(--cs-text);white-space:nowrap}
+.cs-python .cs-editor-body{min-height:90px}
+.cs-python .cs-codemirror{min-width:0;flex:1}
+.cs-sdk-reference{width:330px;max-width:50%;flex-shrink:0;overflow:auto;padding:12px;border-left:1px solid var(--cs-border);font-size:11px;line-height:1.65;color:var(--cs-muted);background:var(--cs-panel)}
+.cs-sdk-heading{display:flex;justify-content:space-between;align-items:center;color:var(--cs-text)}
+.cs-sdk-reference p{margin:8px 0}.cs-sdk-reference input{width:100%;margin:6px 0 10px;font-size:11px!important}
+.cs-sdk-reference details{border-top:1px solid var(--cs-border);padding:9px 0}.cs-sdk-reference summary{cursor:pointer;color:var(--cs-text)}
+.cs-sdk-reference summary small{display:block;color:var(--cs-muted);font:10px ui-monospace,monospace;overflow-wrap:anywhere}
+.cs-sdk-reference pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--cs-bg);padding:8px;border-radius:4px;color:var(--cs-text)}
+.cs-sdk-reference a{color:var(--cs-accent)}
+.cm-python-error-line{background:color-mix(in srgb,var(--cs-red) 12%,transparent);box-shadow:inset 3px 0 var(--cs-red)}
+.cs-python .cm-completionDetail{font-size:10px;color:var(--cs-muted)}
+.cs-python .cm-tooltip-autocomplete{max-width:min(680px,80vw)}
+.cs-python .cm-completionInfo{font:12px/1.6 ui-monospace,monospace;max-width:300px;padding:10px;background:var(--cs-raised)}
+.cs-python .cs-console{height:auto;min-height:27px;padding-top:4px;padding-bottom:4px;flex-shrink:0}
+.cs-diagnostic.cs-console-output{max-height:170px;white-space:normal;border-left:3px solid var(--cs-red);padding:10px 12px;background:var(--cs-panel)}
+.cs-diagnostic-title{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.cs-diagnostic-title strong{color:var(--cs-red);font-size:12px}.cs-diagnostic-title>span{font-size:10px;color:var(--cs-muted)}
+.cs-diagnostic-title button{margin-left:auto;color:var(--cs-red)!important;border:1px solid var(--cs-border)!important;padding:4px 7px!important;font-size:11px!important}
+.cs-diagnostic p{margin:6px 0;overflow-wrap:anywhere;color:var(--cs-text)}.cs-diagnostic p.cs-diagnostic-hint{color:var(--cs-muted);font-size:11px}
+.cs-diagnostic-source{display:block;white-space:pre-wrap;overflow-wrap:anywhere;border-radius:3px;background:var(--cs-bg);padding:6px 8px;color:var(--cs-gold)}
+.cs-diagnostic-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0}.cs-diagnostic-actions button{font-size:11px!important;padding:4px 7px!important;background:var(--cs-raised)!important;border:1px solid var(--cs-border)!important}.cs-diagnostic-actions span{color:var(--cs-muted);font-size:10px}
+.cs-diagnostic details summary,.cs-python-logs summary{font-size:11px;cursor:pointer;color:var(--cs-muted)}.cs-diagnostic details pre{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--cs-muted);margin-top:8px}
+.cs-python-logs{flex-shrink:0;max-height:110px;overflow:auto;border-top:1px solid var(--cs-border)}.cs-python-logs>summary{padding:6px 12px}
+@media(max-width:600px){.chart-studio .cs-python{height:480px;max-height:75%;min-height:340px}.cs-python .cs-editor-toolbar{padding:6px;gap:4px}.cs-python .cs-editor-title{width:100%;justify-content:space-between}.cs-python .cs-editor-actions{justify-content:flex-start;gap:3px;width:100%}.cs-python .cs-syntax-check{order:-2}.cs-python .cs-run{order:-1}.cs-python .cs-editor-actions>button{font-size:10px;padding:5px}.cs-language-strip{padding:5px 8px;font-size:9px}.cs-language-strip>span:last-child{display:none}.cs-sdk-reference{position:absolute;inset:0;width:100%;max-width:100%;z-index:3;border:0}.cs-diagnostic.cs-console-output{max-height:145px}.cs-python .cs-console{font-size:10px}.cs-python .cs-console>span{font-size:10px}}

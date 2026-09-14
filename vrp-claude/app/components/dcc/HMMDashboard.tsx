@@ -15,30 +15,30 @@ interface Props {
 // ── Design tokens per regime ────────────────────────────────────────────────
 const REGIME_CONFIG = {
   0: {
-    label: "Bearish / High-Vol",
+    label: "Lower mean return",
     light: "#ef4444", bg: "bg-red-950/30", border: "border-red-700/50",
     badge: "bg-red-500/20 text-red-300 border-red-500/40",
     dot: "bg-red-500", glow: "shadow-red-500/20",
-    trafficColor: "#ef4444", icon: "🔴", signal: "SELL / HEDGE",
+    trafficColor: "#ef4444", icon: "🔴", signal: "LOWER SAMPLE MEAN",
   },
   1: {
-    label: "Sideways / Neutral",
+    label: "Middle mean return",
     light: "#f59e0b", bg: "bg-amber-950/30", border: "border-amber-700/50",
     badge: "bg-amber-500/20 text-amber-300 border-amber-500/40",
     dot: "bg-amber-500", glow: "shadow-amber-500/20",
-    trafficColor: "#f59e0b", icon: "🟡", signal: "REDUCE / WAIT",
+    trafficColor: "#f59e0b", icon: "🟡", signal: "MIDDLE SAMPLE MEAN",
   },
   2: {
-    label: "Bullish / Low-Vol",
+    label: "Higher mean return",
     light: "#22c55e", bg: "bg-emerald-950/30", border: "border-emerald-700/50",
     badge: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40",
     dot: "bg-emerald-500", glow: "shadow-emerald-500/20",
-    trafficColor: "#22c55e", icon: "🟢", signal: "BUY / HOLD",
+    trafficColor: "#22c55e", icon: "🟢", signal: "HIGHER SAMPLE MEAN",
   },
 } as const;
 
 const STATE_COLORS = ["#ef4444", "#f59e0b", "#22c55e"];
-const STATE_KEYS = ["Bearish / High-Vol", "Sideways / Neutral", "Bullish / Low-Vol"];
+const STATE_KEYS = ["Lower mean return", "Middle mean return", "Higher mean return"];
 
 const fmtPct = (v: number) => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
 const fmtDate = (v: string) => {
@@ -132,7 +132,7 @@ function TrafficLight({ hmm }: { hmm: HMMResult }) {
 
       {/* Transition probs footer */}
       <div className="mt-4 pt-4 border-t border-zinc-800/60">
-        <p className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest mb-2">Next Regime Probabilities</p>
+        <p className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest mb-2">Transition probabilities conditional on assigned state</p>
         <div className="flex gap-3 flex-wrap">
           {hmm.transition_probs.map((tp) => {
             const idx = STATE_KEYS.indexOf(tp.to_state);
@@ -163,9 +163,9 @@ function RegimeOverlay({ series }: { series: HMMStatePoint[] }) {
     bearish: pt.state_id === 0 ? 1 : 0,
     neutral: pt.state_id === 1 ? 1 : 0,
     bullish: pt.state_id === 2 ? 1 : 0,
-    prob_bear: pt.proba["Bearish / High-Vol"] ?? 0,
-    prob_neut: pt.proba["Sideways / Neutral"] ?? 0,
-    prob_bull: pt.proba["Bullish / Low-Vol"] ?? 0,
+    prob_bear: pt.proba["Lower mean return"] ?? 0,
+    prob_neut: pt.proba["Middle mean return"] ?? 0,
+    prob_bull: pt.proba["Higher mean return"] ?? 0,
   }));
 
   const displayPoint = hoveredPoint || data[data.length - 1];
@@ -260,15 +260,15 @@ function RegimeOverlay({ series }: { series: HMMStatePoint[] }) {
             <XAxis dataKey="timestamp" tickFormatter={fmtDate} stroke="#71717a" fontSize={9} tickLine={false} axisLine={false} minTickGap={40} />
             <YAxis stroke="#71717a" fontSize={9} tickLine={false} axisLine={false} width={30} tickFormatter={(v) => `${(v*100).toFixed(0)}%`} domain={[0,1]} />
             <Tooltip content={<CustomTooltip />} />
-            <Area type="monotone" dataKey="prob_bear" stackId="1" stroke="#ef4444" fill="url(#gBear)" name="Bearish" strokeWidth={0} />
+            <Area type="monotone" dataKey="prob_bear" stackId="1" stroke="#ef4444" fill="url(#gBear)" name="Lower mean" strokeWidth={0} />
             <Area type="monotone" dataKey="prob_neut" stackId="1" stroke="#f59e0b" fill="url(#gNeut)" name="Neutral" strokeWidth={0} />
-            <Area type="monotone" dataKey="prob_bull" stackId="1" stroke="#22c55e" fill="url(#gBull)" name="Bullish" strokeWidth={0} />
+            <Area type="monotone" dataKey="prob_bull" stackId="1" stroke="#22c55e" fill="url(#gBull)" name="Higher mean" strokeWidth={0} />
           </AreaChart>
         </ResponsiveContainer>
       </div>
 
       <div className="flex flex-wrap gap-4 justify-center text-[10px] font-mono">
-        {[["#ef4444","Bearish / High-Vol"],["#f59e0b","Sideways / Neutral"],["#22c55e","Bullish / Low-Vol"]].map(([c,l])=>(
+        {[["#ef4444","Lower mean return"],["#f59e0b","Middle mean return"],["#22c55e","Higher mean return"]].map(([c,l])=>(
           <span key={l} className="flex items-center gap-1.5">
             <span className="w-2.5 h-2.5 rounded-full" style={{backgroundColor:c}}/>
             <span className="text-zinc-400">{l}</span>
@@ -380,8 +380,8 @@ function StateSummaryCards({ hmm }: { hmm: HMMResult }) {
               {[
                 { label: "Mean Return", val: `${fmtPct(s.mean_return)}`, color: s.mean_return >= 0 ? "text-emerald-400" : "text-red-400" },
                 { label: "Mean Vol", val: `${s.mean_vol.toFixed(3)}%`, color: "text-amber-400" },
-                { label: "Sharpe", val: s.sharpe_proxy.toFixed(3), color: s.sharpe_proxy >= 0 ? "text-cyan-400" : "text-red-400" },
-                { label: "Exp. DD", val: `${s.expected_dd_pct.toFixed(1)}%`, color: "text-rose-400" },
+                { label: "Mean / SD (bar)", val: s.sharpe_proxy.toFixed(3), color: s.sharpe_proxy >= 0 ? "text-cyan-400" : "text-red-400" },
+                { label: "Vol stress proxy", val: `${s.expected_dd_pct.toFixed(1)}%`, color: "text-rose-400" },
                 { label: "Max Ret", val: `${fmtPct(s.max_return)}`, color: "text-emerald-300" },
                 { label: "Min Ret", val: `${fmtPct(s.min_return)}`, color: "text-red-300" },
               ].map(({ label, val, color }) => (
@@ -448,9 +448,9 @@ export default function HMMDashboard({ hmm }: Props) {
         <h4 className="text-xs font-mono font-bold text-zinc-400 uppercase tracking-widest mb-3">Panduan Interpretasi HMM</h4>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-mono">
           {([
-            { icon: "🔴", title: "Bearish / High-Vol", desc: "Volatilitas tinggi, return negatif dominan. Sistem hedge atau keluar posisi.", color: "text-red-400" },
-            { icon: "🟡", title: "Sideways / Neutral", desc: "Pasar konsolidasi. Kurangi ukuran posisi, tunggu breakout dengan konfirmasi.", color: "text-amber-400" },
-            { icon: "🟢", title: "Bullish / Low-Vol", desc: "Regime positif. Correlasi rendah, diversifikasi efektif. Momentum masuk.", color: "text-emerald-400" },
+            { icon: "🔴", title: "Lower mean return", desc: "Kelompok dengan rata-rata return terendah dalam sampel; bukan sinyal jual.", color: "text-red-400" },
+            { icon: "🟡", title: "Middle mean return", desc: "Rata-rata return di tengah tiga kelompok dalam sampel; belum tentu netral atau sideways.", color: "text-amber-400" },
+            { icon: "🟢", title: "Higher mean return", desc: "Rata-rata return tertinggi dalam sampel; belum tentu positif atau memiliki volatilitas rendah.", color: "text-emerald-400" },
           ] as const).map(({ icon, title, desc, color }) => (
             <div key={title} className="flex gap-2 items-start">
               <span className="mt-0.5 shrink-0">{icon}</span>

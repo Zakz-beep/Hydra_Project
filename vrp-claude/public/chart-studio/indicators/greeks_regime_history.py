@@ -1,0 +1,21 @@
+"""Causal historical GEX regime; no snapshot values copied into the past."""
+def calculate(ctx):
+    bars = ctx.data.ohlcv()
+    history = ctx.greeks.history()
+    stale_hours = ctx.input.float("max_age_hours", 24, .1, 168, 1)
+    threshold = ctx.input.float("gex_threshold_usd", 0, 0, 1e12, 1000000)
+    tolerance = pd.Timedelta(hours=stale_hours)
+    gex = (history.total_net_gex * 1e7).reindex(bars.index, method="ffill", tolerance=tolerance)
+    gross = (history.total_gross_gex * 1e7).reindex(bars.index, method="ffill", tolerance=tolerance)
+    if not gex.notna().any():
+        raise ValueError("No stored Greeks observations align with these candles within the age limit. Change chart range/timeframe or collect overlapping snapshots.")
+    ctx.plot.histogram("net_gex", gex, pane="GEX USD per 1%", color="#eab86b")
+    ctx.plot.line("gross_gex", gross, pane="GEX USD per 1%", color="#879cfa")
+    ctx.plot.hline("zero", 0, pane="GEX USD per 1%", color="#74849b")
+    concentration = gex / gross.where(gross > 0)
+    ctx.plot.line("net_gross", concentration, pane="Net / Gross GEX", color="#45c9b0")
+    positive = (gex > threshold) & (gex.shift(1) <= threshold)
+    negative = (gex < -threshold) & (gex.shift(1) >= -threshold)
+    ctx.plot.marker("positive_flip", positive, text="Positive GEX regime", color="#45c9b0")
+    ctx.plot.marker("negative_flip", negative, text="Negative GEX regime", color="#df7884")
+    print(f"{ctx.greeks.meta['ticker']}: {len(history)} stored snapshots; causal forward alignment, max age {stale_hours:g}h. GEX regime is model exposure, not a trade recommendation.")

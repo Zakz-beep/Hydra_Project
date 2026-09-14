@@ -576,7 +576,6 @@ def cleanup_db(
     db.cleanup_old_snapshots(ticker, keep_days=keep_days)
     return {"status": "ok", "ticker": ticker, "kept_days": keep_days}
 
-
 @app.get("/api/tickers")
 def get_tickers():
     """[NEW] Get list of mini tickers for MarketOverview widget."""
@@ -595,6 +594,326 @@ def update_tickers(data: TickersList):
     """[NEW] Update list of mini tickers for MarketOverview widget."""
     db.save_mini_tickers([t.model_dump() for t in data.tickers])
     return {"status": "ok"}
+
+
+@app.get("/api/market/history")
+def get_market_history(
+    ticker: str = Query(default="^GSPC"),
+    interval: str = Query(default="1d"),
+    period: str = Query(default="30d"),
+):
+    """
+    [NEW] Ambil data historical OHLCV. 
+    Mendukung resampling 4h secara dinamis dari data 1h.
+    """
+    sym = ticker.strip()
+    if sym.lower() in ["sp500", "s&p500", "spx", "s&p 500"]:
+        sym = "^GSPC"
+    elif sym.lower() == "vix":
+        sym = "^VIX"
+    
+    try:
+        if interval == "4h":
+            # yfinance tidak punya 4h native, fetch 1h dan resample
+            df = yf.download(sym, interval="1h", period=period, progress=False)
+            if df.empty:
+                raise HTTPException(status_code=404, detail=f"No data found for ticker {sym}")
+            
+            # Convert index to timezone naive for resampling safely
+            if df.index.tz is not None:
+                df.index = df.index.tz_convert(None)
+                
+            # Resample to 4H
+            df_4h = df.resample("4H").agg({
+                "Open": "first",
+                "High": "max",
+                "Low": "min",
+                "Close": "last",
+                "Volume": "sum"
+            }).dropna()
+            df = df_4h
+        else:
+            df = yf.download(sym, interval=interval, period=period, progress=False)
+            if df.empty:
+                raise HTTPException(status_code=404, detail=f"No data found for ticker {sym}")
+
+        # Flatten multi-index columns if present (yfinance sometimes returns them for single ticker)
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        
+        # Format index as string
+        df = df.reset_index()
+        df.rename(columns={df.columns[0]: "time"}, inplace=True)
+        
+        # Convert times to string ISO formats
+        df["time"] = df["time"].apply(lambda x: x.isoformat() if hasattr(x, "isoformat") else str(x))
+        
+        # Convert columns to lowercase for cleaner JSON response
+        df.columns = [c.lower() for c in df.columns]
+        
+        # Convert to dictionary format
+        candles = df.to_dict(orient="records")
+        
+        # Return metadata and latest candles (limit to latest 100 to prevent oversized responses)
+        latest_candles = candles[-100:] if len(candles) > 100 else candles
+        
+        # Compute brief stats
+        closes = [c["close"] for c in latest_candles]
+        highs = [c["high"] for c in latest_candles]
+        lows = [c["low"] for c in latest_candles]
+        
+        return {
+            "success": True,
+            "ticker": sym,
+            "original_ticker": ticker,
+            "interval": interval,
+            "period": period,
+            "total_candles": len(candles),
+            "returned_candles": len(latest_candles),
+            "stats": {
+                "latest_price": closes[-1] if closes else None,
+                "high": max(highs) if highs else None,
+                "low": min(lows) if lows else None,
+                "start_time": latest_candles[0]["time"] if latest_candles else None,
+                "end_time": latest_candles[-1]["time"] if latest_candles else None,
+            },
+            "candles": latest_candles
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/market/price-action")
+def get_market_price_action(
+    ticker: str = Query(default="SPY"),
+    interval: str = Query(default="15m"),
+    period: str = Query(default="5d")
+):
+    """
+    [NEW] Mengambil data market real-time dan menganalisis Price Action:
+    - Support & Resistance Levels (Pivot Points & Local Min/Max)
+    - Moving Averages (EMA 9, 21, 50)
+    - Candlestick Patterns (Hammer, Star, Engulfing, Marubozu, Doji, Inside Bar)
+    - Volatility & Momentum (RSI, ATR, Bollinger Bands)
+    - Trend Bias & Market Structure
+    """
+    sym = ticker.strip()
+    if sym.lower() in ["sp500", "s&p500", "spx", "s&p 500"]:
+        sym = "^GSPC"
+    elif sym.lower() == "vix":
+        sym = "^VIX"
+        
+    try:
+        # Download data
+        df = yf.download(sym, interval=interval, period=period, progress=False)
+        if df.empty:
+            raise HTTPException(status_code=404, detail=f"No data found for ticker {sym}")
+            
+        # Flatten columns if multi-index
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        
+        # We need at least 15 candles for indicators
+        if len(df) < 15:
+            raise HTTPException(status_code=400, detail="Not enough data history to perform price action analysis. Try a larger period.")
+            
+        # Calculate moving averages
+        df['ema9'] = df['Close'].ewm(span=9, adjust=False).mean()
+        df['ema21'] = df['Close'].ewm(span=21, adjust=False).mean()
+        df['sma50'] = df['Close'].rolling(window=min(50, len(df))).mean()
+        
+        # Calculate RSI (14)
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / (loss + 1e-10)
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
+        # Calculate ATR (14)
+        high_low = df['High'] - df['Low']
+        high_close = (df['High'] - df['Close'].shift()).abs()
+        low_close = (df['Low'] - df['Close'].shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['atr'] = tr.rolling(window=14).mean()
+        
+        # Calculate Bollinger Bands
+        df['bb_mid'] = df['Close'].rolling(window=20).mean()
+        df['bb_std'] = df['Close'].rolling(window=20).std()
+        df['bb_upper'] = df['bb_mid'] + 2 * df['bb_std']
+        df['bb_lower'] = df['bb_mid'] - 2 * df['bb_std']
+        
+        # Calculate Local Support & Resistance levels (Pivot Points standard)
+        # Using peak/trough detection with 5-candle window
+        peaks = []
+        troughs = []
+        window = min(5, len(df) // 10)
+        if window < 1: window = 1
+        
+        for i in range(window, len(df) - window):
+            is_peak = True
+            is_trough = True
+            for j in range(i - window, i + window + 1):
+                if j == i: continue
+                if df['High'].iloc[j] >= df['High'].iloc[i]: is_peak = False
+                if df['Low'].iloc[j] <= df['Low'].iloc[i]: is_trough = False
+            if is_peak: peaks.append(float(df['High'].iloc[i]))
+            if is_trough: troughs.append(float(df['Low'].iloc[i]))
+            
+        # Cluster levels to find key areas
+        def cluster_levels(levels, threshold_pct=0.01):
+            if not levels: return []
+            levels = sorted(list(set(levels)))
+            clustered = [levels[0]]
+            for lvl in levels[1:]:
+                if (lvl - clustered[-1]) / clustered[-1] > threshold_pct:
+                    clustered.append(lvl)
+            return clustered
+            
+        clustered_support = cluster_levels(troughs)
+        clustered_resistance = cluster_levels(peaks)
+        
+        # Get last 3 candles for pattern analysis
+        c0 = df.iloc[-1]
+        c1 = df.iloc[-2]
+        c2 = df.iloc[-3]
+        
+        def get_body(c): return abs(float(c['Close'] - c['Open']))
+        def is_green(c): return float(c['Close']) > float(c['Open'])
+        def is_red(c): return float(c['Close']) < float(c['Open'])
+        
+        body0 = get_body(c0)
+        lower_shadow0 = float(c0['Open'] - c0['Low'] if is_green(c0) else c0['Close'] - c0['Low'])
+        upper_shadow0 = float(c0['High'] - c0['Close'] if is_green(c0) else c0['High'] - c0['Open'])
+        range0 = float(c0['High'] - c0['Low'])
+        
+        body1 = get_body(c1)
+        range1 = float(c1['High'] - c1['Low'])
+        
+        patterns = []
+        if range0 > 0:
+            # Hammer
+            if lower_shadow0 >= 2 * body0 and upper_shadow0 <= 0.2 * body0:
+                patterns.append("Hammer (Bullish Reversal)")
+            # Shooting Star
+            if upper_shadow0 >= 2 * body0 and lower_shadow0 <= 0.2 * body0:
+                patterns.append("Shooting Star (Bearish Reversal)")
+            # Doji
+            if body0 <= 0.1 * range0:
+                patterns.append("Doji (Neutral/Indecision)")
+            # Bullish Engulfing
+            if is_red(c1) and is_green(c0) and float(c0['Close']) > float(c1['Open']) and float(c0['Open']) < float(c1['Close']):
+                patterns.append("Bullish Engulfing")
+            # Bearish Engulfing
+            if is_green(c1) and is_red(c0) and float(c0['Close']) < float(c1['Open']) and float(c0['Open']) > float(c1['Close']):
+                patterns.append("Bearish Engulfing")
+            # Inside Bar
+            if float(c0['High']) < float(c1['High']) and float(c0['Low']) > float(c1['Low']):
+                patterns.append("Inside Bar (Consolidation)")
+            # Marubozu
+            if body0 >= 0.9 * range0:
+                patterns.append("Marubozu (Strong Momentum " + ("Bullish" if is_green(c0) else "Bearish") + ")")
+                
+        # Proximity to Support & Resistance
+        current_price = float(c0['Close'])
+        near_support = None
+        near_resistance = None
+        proximity_threshold = 0.005 # 0.5%
+        
+        for sup in clustered_support:
+            if abs(current_price - sup) / sup <= proximity_threshold:
+                near_support = sup
+                break
+                
+        for res in clustered_resistance:
+            if abs(current_price - res) / res <= proximity_threshold:
+                near_resistance = res
+                break
+                
+        # Trend Bias & Strength
+        ema_bias = "Bullish" if float(c0['ema9']) > float(c0['ema21']) else "Bearish"
+        rsi_val = float(c0['rsi'])
+        rsi_state = "Overbought" if rsi_val > 70 else "Oversold" if rsi_val < 30 else "Neutral"
+        
+        # Moving average golden/death cross check
+        crossover_event = "None"
+        if float(c0['ema9']) > float(c0['ema21']) and float(c1['ema9']) <= float(c1['ema21']):
+            crossover_event = "Bullish Golden Cross"
+        elif float(c0['ema9']) < float(c0['ema21']) and float(c1['ema9']) >= float(c1['ema21']):
+            crossover_event = "Bearish Death Cross"
+            
+        # Bollinger squeeze check
+        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_mid']
+        bb_squeeze = False
+        if len(df) >= 30:
+            recent_widths = df['bb_width'].iloc[-30:]
+            if df['bb_width'].iloc[-1] <= recent_widths.quantile(0.15):
+                bb_squeeze = True
+                
+        # Overall Price Action Recommendation Bias
+        score = 0
+        if ema_bias == "Bullish": score += 1
+        else: score -= 1
+        
+        if current_price > float(c0['sma50']): score += 1
+        else: score -= 1
+        
+        if "Bullish Engulfing" in patterns or "Hammer (Bullish Reversal)" in patterns: score += 2
+        elif "Bearish Engulfing" in patterns or "Shooting Star (Bearish Reversal)" in patterns: score -= 2
+        
+        if crossover_event == "Bullish Golden Cross": score += 2
+        elif crossover_event == "Bearish Death Cross": score -= 2
+        
+        if rsi_state == "Oversold": score += 1
+        elif rsi_state == "Overbought": score -= 1
+        
+        overall_bias = "Bullish" if score >= 2 else "Bearish" if score <= -2 else "Neutral / Rangebound"
+        
+        # Clean history format
+        df = df.reset_index()
+        df.rename(columns={df.columns[0]: "time"}, inplace=True)
+        df["time"] = df["time"].apply(lambda x: x.isoformat() if hasattr(x, "isoformat") else str(x))
+        df.columns = [c.lower() for c in df.columns]
+        
+        # Limit candles to latest 50 for quick display
+        latest_candles = df.to_dict(orient="records")[-50:]
+        
+        return {
+            "success": True,
+            "ticker": sym,
+            "original_ticker": ticker,
+            "interval": interval,
+            "period": period,
+            "analysis": {
+                "latest_price": current_price,
+                "overall_bias": overall_bias,
+                "score": score,
+                "trend": {
+                    "ema_bias": ema_bias,
+                    "ema9": float(c0['ema9']),
+                    "ema21": float(c0['ema21']),
+                    "sma50": float(c0['sma50']),
+                    "crossover_event": crossover_event
+                },
+                "volatility_momentum": {
+                    "rsi": rsi_val,
+                    "rsi_state": rsi_state,
+                    "atr": float(c0['atr']),
+                    "bb_upper": float(c0['bb_upper']),
+                    "bb_lower": float(c0['bb_lower']),
+                    "bb_squeeze": bb_squeeze
+                },
+                "candlestick_patterns": patterns,
+                "support_resistance": {
+                    "support_levels": clustered_support[-5:] if len(clustered_support) > 5 else clustered_support,
+                    "resistance_levels": clustered_resistance[-5:] if len(clustered_resistance) > 5 else clustered_resistance,
+                    "near_support": near_support,
+                    "near_resistance": near_resistance
+                }
+            },
+            "candles": latest_candles
+        }
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ═══════════════════════════════════════════════
@@ -998,6 +1317,130 @@ def close_paper_trade(req: PaperCloseRequest):
         db.delete_paper_position(pos["id"])
         
         return {"status": "success", "pnl": final_pnl, "new_balance": new_balance}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════
+# RUN
+# ═══════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════
+# CHAT SESSIONS ENDPOINTS
+# ═══════════════════════════════════════════════
+
+import uuid as _uuid_mod
+
+class SessionCreateRequest(BaseModel):
+    id: Optional[str] = None
+    name: str
+    ticker: str = "SPY"
+    persona_id: str = "default"
+
+class SessionUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    messages: list = []
+    approval_history: list = []
+    conversation_state: Optional[dict] = None
+    dag_nodes: list = []          # LiveStepNode[] serialized
+    decision_tree: Optional[dict] = None  # DecisionTree | null
+
+class SessionRenameRequest(BaseModel):
+    name: str
+
+@app.get("/api/sessions")
+def list_sessions():
+    """List all saved chat sessions (metadata only, no messages)."""
+    try:
+        sessions = db.list_sessions()
+        return {"sessions": sessions, "total": len(sessions)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/sessions")
+def create_session(req: SessionCreateRequest):
+    """Create a new empty chat session."""
+    try:
+        session_id = req.id or str(_uuid_mod.uuid4())
+        session = db.create_session(
+            session_id=session_id,
+            name=req.name,
+            ticker=req.ticker,
+            persona_id=req.persona_id,
+        )
+        return {"session": session}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/sessions/{session_id}")
+def get_session(session_id: str):
+    """Get a single session with full messages, DAG nodes, and decision tree."""
+    try:
+        session = db.get_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        # Parse JSON fields
+        import json as _json
+        session["messages"] = _json.loads(session.get("messages_json", "[]") or "[]")
+        session["approval_history"] = _json.loads(session.get("approval_history_json", "[]") or "[]")
+        raw_state = session.get("conversation_state_json")
+        session["conversation_state"] = _json.loads(raw_state) if raw_state else None
+        session["dag_nodes"] = _json.loads(session.get("dag_nodes_json", "[]") or "[]")
+        raw_tree = session.get("decision_tree_json")
+        session["decision_tree"] = _json.loads(raw_tree) if raw_tree else None
+        # Remove raw json fields
+        for k in ["messages_json", "approval_history_json", "conversation_state_json",
+                  "dag_nodes_json", "decision_tree_json"]:
+            session.pop(k, None)
+        return {"session": session}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/sessions/{session_id}")
+def update_session(session_id: str, req: SessionUpdateRequest):
+    """Save/update session messages, approval history, conversation state, DAG nodes, and decision tree."""
+    try:
+        import json as _json
+        # Build preview from last non-empty user message
+        preview = ""
+        for msg in reversed(req.messages):
+            content = msg.get("content", "") or ""
+            if content.strip():
+                preview = content[:80]
+                break
+
+        db.update_session(
+            session_id=session_id,
+            name=req.name,
+            messages_json=_json.dumps(req.messages, default=str),
+            approval_history_json=_json.dumps(req.approval_history, default=str),
+            conversation_state_json=_json.dumps(req.conversation_state, default=str) if req.conversation_state else None,
+            message_count=len(req.messages),
+            preview=preview,
+            dag_nodes_json=_json.dumps(req.dag_nodes, default=str),
+            decision_tree_json=_json.dumps(req.decision_tree, default=str) if req.decision_tree else None,
+        )
+        return {"status": "saved", "session_id": session_id, "message_count": len(req.messages)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.patch("/api/sessions/{session_id}/rename")
+def rename_session(session_id: str, req: SessionRenameRequest):
+    """Rename a session."""
+    try:
+        db.rename_session(session_id, req.name)
+        return {"status": "renamed", "session_id": session_id, "name": req.name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str):
+    """Delete a session permanently."""
+    try:
+        db.delete_session(session_id)
+        return {"status": "deleted", "session_id": session_id}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

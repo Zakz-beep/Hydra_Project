@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, List, Dict
 
 from hmm_har_volatility import (
     HARRVModel,
@@ -38,6 +38,7 @@ from hmm_har_volatility import (
 from msar import MSARModel, run_msar_model
 from har_cj_model import run_har_cj_model
 from har_kalman_model import run_kalman_har_cj
+from enet_mz_model import EnetMZPropFirmEngine
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -143,6 +144,25 @@ class LGBMRegimeRequest(BaseModel):
     confidence_threshold: float = 0.60
     high_conf_threshold: float  = 0.80
     top_n_shap: int = 10         # number of SHAP features to return
+
+
+class TuningHMMRequest(BaseModel):
+    ticker: str
+    features: List[str]
+    n_components: int
+    covariance_type: str = "diag"
+    n_iter: int = 100
+    tol: float = 1e-4
+    period: str = "2y"
+    interval: str = "1d"
+
+
+class PropFirmRiskRequest(BaseModel):
+    ticker: str = 'SPY'
+    equity: float = 50000.0
+    daily_loss_usd: float = 2500.0
+    total_loss_usd: float = 5000.0
+    tp_target_usd: float = 3000.0
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -757,6 +777,292 @@ async def lgbm_regime_endpoint(req: LGBMRegimeRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"LightGBM regime error: {str(e)}")
+
+
+@app.post("/api/vol/hmm/tune")
+async def hmm_tune_endpoint(req: TuningHMMRequest):
+    """
+    Dynamically train and tune a Gaussian HMM on a set of selected features for a specific ticker.
+    Calculates AIC, BIC, Log-Likelihood, Transition probabilities, and state summaries.
+    Allows AI/user to optimize the hyperparameters (n_components, covariance_type, features).
+    """
+    try:
+        if not req.features:
+            raise HTTPException(status_code=400, detail="At least one feature must be selected.")
+        if req.n_components < 2 or req.n_components > 5:
+            raise HTTPException(status_code=400, detail="Number of states/components must be between 2 and 5.")
+        if req.covariance_type not in ["spherical", "diag", "tied", "full"]:
+            raise HTTPException(status_code=400, detail="Invalid covariance_type. Supported: spherical, diag, tied, full")
+
+        # 1. Fetch OHLCV data using yfinance
+        df = yf.download(req.ticker, period=req.period, interval=req.interval, progress=False, auto_adjust=True)
+        if df.empty:
+            raise HTTPException(status_code=404, detail=f"No price data found for ticker '{req.ticker}'")
+            
+        # Flatten MultiIndex if yfinance returns multi-indexed columns
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        df.columns = df.columns.str.lower()
+        
+        required_cols = {"open", "high", "low", "close", "volume"}
+        missing_cols = required_cols - set(df.columns)
+        if missing_cols:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"OHLCV columns missing from price history: {missing_cols}. yfinance may have returned incomplete data."
+            )
+
+        df = df.dropna()
+
+        # 2. Extract features
+        df_feat = pd.DataFrame(index=df.index)
+        close = df['close']
+        returns_series = np.log(close / close.shift(1))
+        
+        supported_features = [
+            "returns", "volatility_5", "volatility_10", "volatility_22",
+            "range", "volume_change", "ma_ratio_5_22"
+        ]
+        
+        for f in req.features:
+            if f not in supported_features:
+                raise HTTPException(status_code=400, detail=f"Unsupported feature: '{f}'. Supported: {supported_features}")
+            
+            if f == "returns":
+                df_feat["returns"] = returns_series
+            elif f == "volatility_5":
+                df_feat["volatility_5"] = returns_series.rolling(5).std()
+            elif f == "volatility_10":
+                df_feat["volatility_10"] = returns_series.rolling(10).std()
+            elif f == "volatility_22":
+                df_feat["volatility_22"] = returns_series.rolling(22).std()
+            elif f == "range":
+                df_feat["range"] = np.log(df['high'] / df['low'])
+            elif f == "volume_change":
+                vol = df['volume'].clip(lower=1)
+                df_feat["volume_change"] = np.log(vol / vol.shift(1))
+            elif f == "ma_ratio_5_22":
+                df_feat["ma_ratio_5_22"] = close.rolling(5).mean() / close.rolling(22).mean()
+
+        # Drop rows with NaNs from feature extraction rolling windows
+        df_feat = df_feat.dropna()
+        if len(df_feat) < req.n_components + 10:
+            raise HTTPException(status_code=400, detail=f"Too few valid aligned data rows ({len(df_feat)}) for HMM after rolling calculations.")
+
+        # X array
+        X = df_feat.values
+        dates = df_feat.index
+        
+        # 3. Scale features
+        X_mean = X.mean(axis=0)
+        X_std = X.std(axis=0) + 1e-8
+        X_scaled = (X - X_mean) / X_std
+
+        # 4. Train GaussianHMM
+        from hmmlearn.hmm import GaussianHMM
+        
+        model = GaussianHMM(
+            n_components=req.n_components,
+            covariance_type=req.covariance_type,
+            n_iter=req.n_iter,
+            tol=req.tol,
+            random_state=42
+        )
+        
+        try:
+            model.fit(X_scaled)
+        except Exception as fe:
+            raise HTTPException(
+                status_code=400,
+                detail=f"HMM Training failed to converge or encountered a numerical error: {str(fe)}. Try using a simpler covariance_type (e.g., 'diag') or fewer components."
+            )
+
+        # 5. Predict hidden states and scores
+        hidden_states = model.predict(X_scaled)
+        log_likelihood = float(model.score(X_scaled))
+        state_proba = model.predict_proba(X_scaled) # shape (T, N)
+        converged = bool(model.monitor_.converged)
+
+        # 6. Calculate Model Selection Metrics (AIC/BIC)
+        T = len(X_scaled)
+        D = X_scaled.shape[1]
+        N = req.n_components
+        
+        # Calculate params K
+        transitions_params = N * (N - 1)
+        init_params = N - 1
+        means_params = N * D
+        
+        if req.covariance_type == "spherical":
+            cov_params = N
+        elif req.covariance_type == "diag":
+            cov_params = N * D
+        elif req.covariance_type == "tied":
+            cov_params = D * (D + 1) // 2
+        elif req.covariance_type == "full":
+            cov_params = N * (D * (D + 1) // 2)
+        else:
+            cov_params = N * D
+            
+        K = transitions_params + init_params + means_params + cov_params
+        
+        aic = 2 * K - 2 * log_likelihood
+        bic = K * np.log(T) - 2 * log_likelihood
+
+        # 7. Sort states by performance (annualized log-return)
+        # We align returns_series (log-returns) with df_feat dates to calculate actual mean return
+        aligned_returns = returns_series.loc[dates]
+        
+        state_means = {s: float(aligned_returns.iloc[hidden_states == s].mean()) for s in range(N)}
+        # Rank states ascending [worst, ..., best] return
+        sorted_raw_states = sorted(state_means, key=state_means.get)
+        # Map raw state ID -> sorted state ID (0 is bearish/worst return, N-1 is bullish/best return)
+        raw_to_sorted = {sorted_raw_states[i]: i for i in range(N)}
+        sorted_to_raw = {i: sorted_raw_states[i] for i in range(N)}
+        
+        # Labeled state series
+        states_labeled = np.array([raw_to_sorted[s] for s in hidden_states])
+
+        # 8. Remap Model Parameters
+        tm = model.transmat_
+        start_prob = model.startprob_
+        
+        # Transition matrix in sorted order
+        transition_matrix = []
+        for i in range(N):
+            row = {}
+            for j in range(N):
+                row[f"Regime {j}"] = round(float(tm[sorted_to_raw[i], sorted_to_raw[j]]), 6)
+            transition_matrix.append({"from": f"Regime {i}", "to": row})
+            
+        start_prob_sorted = [round(float(start_prob[sorted_to_raw[i]]), 4) for i in range(N)]
+
+        # Calculate stationary distribution (eigenvector corresponding to eigenvalue 1)
+        stationary_dist = []
+        try:
+            P = tm.T
+            A = P - np.eye(N)
+            A[-1] = np.ones(N)
+            b = np.zeros(N)
+            b[-1] = 1
+            v = np.linalg.solve(A, b)
+            stationary_dist = [round(float(v[sorted_to_raw[i]]), 4) for i in range(N)]
+        except Exception:
+            stationary_dist = [round(float(np.mean(states_labeled == i)), 4) for i in range(N)]
+
+        # 9. Build per-state summaries (unscaled feature centers)
+        state_summary = []
+        for i in range(N):
+            mask = states_labeled == i
+            count = int(mask.sum())
+            pct = float(count / len(states_labeled) * 100)
+            
+            df_regime = df_feat.iloc[mask]
+            
+            feats_raw_means = {}
+            for col in df_feat.columns:
+                val = float(df_regime[col].mean())
+                if "return" in col or "volatility" in col or "range" in col:
+                    feats_raw_means[col] = round(val * 100, 4) # in %
+                else:
+                    feats_raw_means[col] = round(val, 4)
+                    
+            regime_rets = aligned_returns.iloc[mask]
+            if len(regime_rets) > 1 and regime_rets.std() > 0:
+                sharpe = float(regime_rets.mean() / regime_rets.std()) * np.sqrt(252)
+            else:
+                sharpe = 0.0
+
+            state_summary.append({
+                "regime_id": i,
+                "name": f"Regime {i}",
+                "count": count,
+                "pct_history": round(pct, 2),
+                "stationary_probability": stationary_dist[i],
+                "sharpe_annualized": round(sharpe, 4),
+                "feature_averages": feats_raw_means
+            })
+
+        # 10. Compile recent history (last 100 bars) for timeseries charting
+        recent_history = []
+        last_n = min(100, len(dates))
+        for idx in range(len(dates) - last_n, len(dates)):
+            ts = dates[idx]
+            ts_str = ts.strftime('%Y-%m-%d') if hasattr(ts, 'strftime') else str(ts)
+            state_id = int(states_labeled[idx])
+            
+            feature_vals = {}
+            for col in df_feat.columns:
+                val = float(df_feat.iloc[idx][col])
+                if "return" in col or "volatility" in col or "range" in col:
+                    feature_vals[col] = round(val * 100, 4)
+                else:
+                    feature_vals[col] = round(val, 4)
+                    
+            recent_history.append({
+                "date": ts_str,
+                "regime_id": state_id,
+                "regime_name": f"Regime {state_id}",
+                "features": feature_vals
+            })
+
+        # 11. Current state details
+        current_state = int(states_labeled[-1])
+        current_posteriors = {
+            f"Regime {i}": round(float(state_proba[-1, sorted_to_raw[i]]), 4)
+            for i in range(N)
+        }
+        
+        return {
+            "status": "success",
+            "ticker": req.ticker,
+            "n_samples": T,
+            "n_features": D,
+            "features_selected": req.features,
+            "n_components": N,
+            "covariance_type": req.covariance_type,
+            "converged": converged,
+            "log_likelihood": round(log_likelihood, 4),
+            "aic": round(aic, 4),
+            "bic": round(bic, 4),
+            "current_regime": current_state,
+            "current_posteriors": current_posteriors,
+            "start_probabilities": start_prob_sorted,
+            "transition_matrix": transition_matrix,
+            "state_summary": state_summary,
+            "recent_history": recent_history
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"HMM tuning error: {str(e)}")
+
+
+# ── Prop Firm Risk Endpoint ────────────────────────────────────────────────────
+
+@app.post("/api/vol/propfirm-risk")
+async def propfirm_risk_endpoint(req: PropFirmRiskRequest):
+    """
+    Quantitative Pro-Firm Risk Engine (ENet+MZ-Cal).
+    Returns dynamic sizing, capital recommendations, and execution strategy
+    based on predicted volatility and prop firm parameters.
+    """
+    try:
+        engine = EnetMZPropFirmEngine()
+        result = engine.run(
+            ticker=req.ticker,
+            equity=req.equity,
+            daily_loss=req.daily_loss_usd,
+            total_loss=req.total_loss_usd,
+            tp_target=req.tp_target_usd
+        )
+        return {'status': 'success', **result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Prop Firm Risk Engine error: {str(e)}")
 
 
 # -- Entry point ------------------------------------------------------------────

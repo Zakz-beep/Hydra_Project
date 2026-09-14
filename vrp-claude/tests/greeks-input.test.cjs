@@ -1,0 +1,6 @@
+const { test }=require('node:test');const assert=require('node:assert/strict');const fs=require('fs'),ts=require('typescript');
+require.extensions['.ts']=(m,f)=>m._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,f);
+const {prepareGreeksInput}=require('../app/lib/chart-studio/greeksInput.ts');
+const fixture=require('./greeks-indicator-fixture.cjs');
+test('replay strips current snapshot, chain and OI changes; future historical samples excluded',()=>{const {data,bars}=fixture();const r=prepareGreeksInput(data,'SPY',bars[30].time,true);assert.equal(r.snapshot,null);assert.deepEqual(r.chain,[]);assert.deepEqual(r.oi_changes,[]);assert.equal(r.meta.snapshot_time,null);assert.ok(r.history.every(h=>h.time<=bars[30].time));assert.equal(r.history.length,30)});
+test('Greeks input rejects mismatched ticker and incomplete payload',()=>{const {data}=fixture();assert.throws(()=>prepareGreeksInput(data,'TSLA',Date.now()/1000,false),/another ticker/);assert.throws(()=>prepareGreeksInput({...data,snapshot:null},'SPY',1,false),/incomplete/);assert.equal(prepareGreeksInput(data,'SPY',Date.now()/1000,false).chain.length,12)});

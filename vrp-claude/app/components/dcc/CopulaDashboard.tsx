@@ -63,6 +63,7 @@ const COPULA_CONFIG = {
 
 export default function CopulaDashboard({ copula, timeseries = [] }: Props) {
   if (!copula) return null;
+  if (!copula.best_fit) return <p>Empirical tail estimates are available in Joint extremes. No parametric copula family was fitted.</p>;
 
   const cfg = COPULA_CONFIG[copula.best_fit];
   const { pair, lambda_L, lambda_U, u_space_points, percentiles } = copula;

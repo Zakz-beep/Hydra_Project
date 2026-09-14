@@ -10,8 +10,8 @@ Menghitung Greeks aggregate per expiry dan per strike untuk:
   VEX   — Vega Exposure (sensitivity IV aggregate)
 
 Expiry buckets: 0DTE, 1DTE, 7DTE, 14DTE, 30DTE
-Data source   : yfinance (delay ~15 menit)
-Fallback      : synthetic options chain
+Data source   : Alpaca options snapshots + dated contract OI
+Fallback      : none; provider/configuration failures are explicit
 
 Cara pakai:
   from options_inventory import OptionsInventoryEngine
@@ -24,9 +24,9 @@ Author: generated for FLOW's VRP Signal Engine
 import warnings
 import numpy as np
 import pandas as pd
-import yfinance as yf
+from alpaca_options import AlpacaOptionsProvider, OptionsDataError
 from scipy.stats import norm
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import Optional
 import time
@@ -47,6 +47,45 @@ MAX_IV          = 5.0
 RISK_FREE_RATE  = 0.0525       # approx Fed Funds Rate
 
 
+# Compatibility for the separate Hybrid/SVI Yahoo research modules. The Alpaca
+# OptionsInventoryEngine below never calls these helpers or falls back to Yahoo.
+def _get_expiry_dates(ticker_obj) -> list[str]:
+    try:
+        return list(ticker_obj.options)
+    except Exception:
+        return []
+
+
+def _fetch_options_chain(ticker_obj, expiry_str: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    try:
+        chain = ticker_obj.option_chain(expiry_str)
+        calls, puts = chain.calls.copy(), chain.puts.copy()
+        for frame in (calls, puts):
+            frame.columns = [c.lower().replace(" ", "_") for c in frame.columns]
+            for col in ("bid", "ask", "lastprice", "openinterest", "volume", "impliedvolatility"):
+                if col not in frame.columns:
+                    frame[col] = 0.0
+        return calls, puts
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame()
+
+
+def _fetch_spot_price(ticker_obj, ticker_str: str) -> tuple[float, str]:
+    """Legacy Yahoo research contract; callers must inspect the source flag."""
+    try:
+        return float(ticker_obj.fast_info["last_price"]), "realtime"
+    except Exception:
+        pass
+    try:
+        import yfinance as yf
+        hist = yf.download(ticker_str, period="2d", interval="1d", progress=False, auto_adjust=True)
+        if not hist.empty:
+            return float(hist["Close"].iloc[-1]), "delayed"
+    except Exception:
+        pass
+    return 450.0, "synthetic"
+
+
 # ════════════════════════════════════════════════════════
 # DATA STRUCTURES
 # ════════════════════════════════════════════════════════
@@ -59,7 +98,7 @@ class StrikeGreeks:
     dte:          int           # days to expiry
     option_type:  str           # 'call' atau 'put'
     oi:           int
-    volume:       int
+    volume:       Optional[int]
     mid_price:    float
     iv:           float
 
@@ -79,6 +118,7 @@ class StrikeGreeks:
     charm_exp:      float       # charm × OI × contract_size
     delta_exp:      float       # delta × OI × contract_size  (untuk DAI)
     vega_exp:       float       # vega  × OI × contract_size  (untuk VEX)
+    provenance:    dict = field(default_factory=dict)
 
 
 @dataclass
@@ -108,7 +148,7 @@ class ExpiryInventory:
     gross_vex:         float
 
     # Key levels
-    max_pain:          float    # strike dengan total pain maksimum
+    max_pain:          Optional[float]  # Minimum intrinsic payout, single expiry only
     gamma_flip:        Optional[float]   # level di mana GEX flip sign
     largest_gex_strike: float   # strike dengan GEX terbesar
     largest_gex_value:  float
@@ -176,9 +216,11 @@ def bsm_greeks(
         # At/past expiry
         if option_type == "call":
             delta = 1.0 if S > K else 0.0
+            price = max(0.0, S - K)
         else:
             delta = -1.0 if S < K else 0.0
-        return dict(delta=delta, gamma=0.0, theta=0.0, vega=0.0,
+            price = max(0.0, K - S)
+        return dict(price=price, delta=delta, gamma=0.0, theta=0.0, vega=0.0,
                     rho=0.0, vanna=0.0, charm=0.0)
 
     d1, d2     = _d1_d2(S, K, T, r, sigma)
@@ -230,7 +272,14 @@ def bsm_greeks(
     else:
         charm = 0.0
 
+    # Option Price
+    if option_type == "call":
+        price = S * cdf_d1 - K * np.exp(-r * T) * cdf_d2
+    else:
+        price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+
     return dict(
+        price=float(price),
         delta=float(delta),
         gamma=float(gamma),
         theta=float(theta),
@@ -277,116 +326,6 @@ def implied_vol_newton(
 
 # ════════════════════════════════════════════════════════
 # DATA FETCH & SYNTHETIC FALLBACK
-# ════════════════════════════════════════════════════════
-
-def _get_expiry_dates(ticker_obj) -> list[str]:
-    """Ambil semua tanggal expiry yang tersedia."""
-    try:
-        return list(ticker_obj.options)
-    except Exception:
-        return []
-
-
-def _fetch_options_chain(
-    ticker_obj, expiry_str: str
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Fetch calls dan puts untuk satu expiry.
-    Return (calls_df, puts_df).
-    Kolom: strike, lastPrice, bid, ask, openInterest, volume, impliedVolatility
-    """
-    try:
-        chain = ticker_obj.option_chain(expiry_str)
-        calls = chain.calls.copy()
-        puts  = chain.puts.copy()
-
-        # Normalize kolom
-        for df in [calls, puts]:
-            df.columns = [c.lower().replace(" ", "_") for c in df.columns]
-            for col in ["bid", "ask", "lastprice", "openinterest", "volume", "impliedvolatility"]:
-                if col not in df.columns:
-                    df[col] = 0.0
-
-        return calls, puts
-    except Exception:
-        return pd.DataFrame(), pd.DataFrame()
-
-
-def _gen_synthetic_chain(
-    spot: float, expiry_str: str, dte: int, n_strikes: int = 30
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Generate synthetic options chain untuk fallback.
-    Log-normal strike distribution di sekitar spot.
-    """
-    rng = np.random.default_rng(abs(hash(expiry_str)) % 99999)
-
-    T = max(dte, 1) / 365
-    base_iv = 0.18 + 0.05 * rng.random()  # base IV antara 18-23%
-
-    # Strikes: ±15% dari spot, spaced 0.5%
-    pct_range = np.linspace(-0.15, 0.15, n_strikes)
-    strikes   = sorted(spot * np.exp(pct_range))
-    strikes   = [round(s, 0) for s in strikes]
-
-    calls_data = []
-    puts_data  = []
-
-    for K in strikes:
-        moneyness = np.log(K / spot)
-
-        # Volatility smile: higher IV for OTM
-        smile = base_iv + 0.3 * moneyness ** 2 + 0.1 * abs(moneyness)
-        iv = max(0.05, smile)
-
-        # OI: higher near ATM, lower far OTM
-        oi_scale = int(5000 * np.exp(-4 * moneyness ** 2))
-        oi_call  = max(10, int(oi_scale * rng.integers(80, 120) / 100))
-        oi_put   = max(10, int(oi_scale * rng.integers(80, 120) / 100))
-
-        vol_call = int(oi_call * rng.uniform(0.05, 0.3))
-        vol_put  = int(oi_put  * rng.uniform(0.05, 0.3))
-
-        # BSM price
-        d1, d2 = _d1_d2(spot, K, T, RISK_FREE_RATE, iv)
-        call_p  = spot * norm.cdf(d1) - K * np.exp(-RISK_FREE_RATE * T) * norm.cdf(d2)
-        put_p   = K * np.exp(-RISK_FREE_RATE * T) * norm.cdf(-d2) - spot * norm.cdf(-d1)
-
-        spread = max(0.01, call_p * 0.02)
-
-        calls_data.append({
-            "strike": K, "lastprice": max(0.01, call_p),
-            "bid": max(0.01, call_p - spread), "ask": call_p + spread,
-            "openinterest": oi_call, "volume": vol_call, "impliedvolatility": iv
-        })
-        puts_data.append({
-            "strike": K, "lastprice": max(0.01, put_p),
-            "bid": max(0.01, put_p - spread), "ask": put_p + spread,
-            "openinterest": oi_put, "volume": vol_put, "impliedvolatility": iv
-        })
-
-    return pd.DataFrame(calls_data), pd.DataFrame(puts_data)
-
-
-def _fetch_spot_price(ticker_obj, ticker_str: str) -> tuple[float, str]:
-    """Ambil harga spot. Fallback ke history."""
-    try:
-        spot = float(ticker_obj.fast_info["last_price"])
-        return spot, "realtime"
-    except Exception:
-        pass
-    try:
-        hist = yf.download(ticker_str, period="2d", interval="1d",
-                           progress=False, auto_adjust=True)
-        if not hist.empty:
-            return float(hist["Close"].iloc[-1]), "delayed"
-    except Exception:
-        pass
-    return 450.0, "synthetic"
-
-
-# ════════════════════════════════════════════════════════
-# DTE BUCKET ASSIGNMENT
 # ════════════════════════════════════════════════════════
 
 def _dte(expiry_str: str) -> int:
@@ -442,7 +381,8 @@ def _compute_strike_greeks(
     try:
         K   = float(row["strike"])
         oi  = int(row.get("openinterest", 0) or 0)
-        vol = int(row.get("volume", 0) or 0)
+        raw_volume = row.get("volume")
+        vol = int(raw_volume) if raw_volume is not None and pd.notna(raw_volume) else None
 
         if oi < MIN_OI or K <= 0:
             return None
@@ -461,7 +401,7 @@ def _compute_strike_greeks(
         # T (time to expiry dalam tahun)
         T = max(dte_val, 0.5) / 365  # minimal 0.5 hari untuk prevent div/0
 
-        # IV: pakai yfinance IV kalau tersedia, fallback ke Newton-Raphson
+        # All displayed/model Greeks use one BSM convention from provider IV.
         iv_raw = float(row.get("impliedvolatility", 0) or 0)
         if MIN_IV <= iv_raw <= MAX_IV:
             iv = iv_raw
@@ -521,6 +461,7 @@ def _compute_strike_greeks(
             charm_exp=round(charm_exp, 4),
             delta_exp=round(delta_exp, 4),
             vega_exp=round(vega_exp, 4),
+            provenance={key: row.get(key) for key in ('contract_symbol', 'oi_date', 'quote_timestamp', 'trade_timestamp', 'provider_greeks', 'contract_size') if row.get(key) is not None},
         )
     except Exception:
         return None
@@ -530,86 +471,158 @@ def _compute_strike_greeks(
 # MAX PAIN CALCULATION
 # ════════════════════════════════════════════════════════
 
-def _calculate_max_pain(calls_df: pd.DataFrame, puts_df: pd.DataFrame, spot: float) -> float:
+def _calculate_max_pain(calls_df: pd.DataFrame, puts_df: pd.DataFrame, spot: float) -> Optional[float]:
+    """Minimum intrinsic payout at one expiry, using fixed eligible OI.
+
+    No positive OI means unavailable. Equal minima use the lowest strike.
+    This descriptive level is not a price forecast; spot is kept for API compatibility.
     """
-    Max Pain: strike di mana total nilai options yang expire worthless paling besar.
-    (Total pain = total payout yang harus dibayar oleh option writers)
-
-    Formula per strike K_test:
-        pain(K_test) = Σ_calls [max(0, K_test - K_i) × OI_i]
-                     + Σ_puts  [max(0, K_i - K_test) × OI_i]
-
-    Strike dengan pain minimum = max pain level.
-    """
-    if calls_df.empty and puts_df.empty:
-        return spot
-
-    all_strikes = set()
-    if not calls_df.empty:
-        all_strikes.update(calls_df["strike"].values)
-    if not puts_df.empty:
-        all_strikes.update(puts_df["strike"].values)
-
-    if not all_strikes:
-        return spot
-
-    min_pain = float("inf")
-    max_pain_strike = spot
-
-    for K_test in sorted(all_strikes):
-        pain = 0.0
-
-        if not calls_df.empty:
-            oi_calls = calls_df.get("openinterest", pd.Series(dtype=float)).fillna(0)
-            strikes_c = calls_df["strike"].values
-            pain += np.sum(np.maximum(0, K_test - strikes_c) * oi_calls.values)
-
-        if not puts_df.empty:
-            oi_puts = puts_df.get("openinterest", pd.Series(dtype=float)).fillna(0)
-            strikes_p = puts_df["strike"].values
-            pain += np.sum(np.maximum(0, strikes_p - K_test) * oi_puts.values)
-
-        if pain < min_pain:
-            min_pain = pain
-            max_pain_strike = K_test
-
-    return float(max_pain_strike)
+    sides = []
+    for frame in (calls_df, puts_df):
+        if frame.empty or not {"strike", "openinterest"}.issubset(frame.columns):
+            sides.append((np.array([]), np.array([])))
+            continue
+        k = pd.to_numeric(frame["strike"], errors="coerce").to_numpy(dtype=float)
+        oi = pd.to_numeric(frame["openinterest"], errors="coerce").to_numpy(dtype=float)
+        valid = np.isfinite(k) & np.isfinite(oi) & (k > 0) & (oi >= 0)
+        sides.append((k[valid], oi[valid]))
+    if sum(float(oi.sum()) for _, oi in sides) <= 0:
+        return None
+    strikes = np.unique(np.concatenate([k for k, _ in sides]))
+    payout = np.zeros(len(strikes))
+    for side, (k, oi) in enumerate(sides):
+        weights = np.bincount(np.searchsorted(strikes, k), weights=oi, minlength=len(strikes))
+        cumulative = np.cumsum(weights)
+        weighted = np.cumsum(weights * strikes)
+        payout += (strikes * cumulative - weighted) if side == 0 else (
+            weighted[-1] - weighted - strikes * (cumulative[-1] - cumulative))
+    return float(strikes[np.argmin(payout)])
 
 
 # ════════════════════════════════════════════════════════
 # GAMMA FLIP CALCULATION
 # ════════════════════════════════════════════════════════
 
-def _find_gamma_flip(strikes_data: list[StrikeGreeks], spot: float) -> Optional[float]:
+def _compute_total_gex_at_spot(
+    S_hypo: float,
+    strikes: np.ndarray,
+    option_types: np.ndarray,
+    T: np.ndarray,
+    sqrt_T: np.ndarray,
+    ivs: np.ndarray,
+    ois: np.ndarray,
+    r: float,
+) -> float:
     """
-    Cari level di mana net GEX flip dari positif ke negatif (atau sebaliknya).
-    Ini adalah level kritis — di atas flip = positive gamma (suppressed vol),
-    di bawah flip = negative gamma (amplified vol).
+    Compute total net GEX at a hypothetical spot level S_hypo.
+    Uses vectorized BSM gamma across all option contracts.
 
-    Method: cumulative GEX dari strikes terdekat ke spot, cari zero crossing.
+    GEX per contract = sign * gamma(S_hypo, K, T, IV) * OI * 100 * S_hypo^2 / 1e9
+    where sign = +1 for calls, -1 for puts (model convention only).
+
+    Returns: legacy scaled GEX; multiply by 1e7 for USD per 1% spot move.
     """
-    if not strikes_data:
+    d1 = (np.log(S_hypo / strikes) + (r + 0.5 * ivs ** 2) * T) / (ivs * sqrt_T)
+    gamma = norm.pdf(d1) / (S_hypo * ivs * sqrt_T)
+    gex = option_types * gamma * ois * CONTRACT_SIZE * (S_hypo ** 2) / 1e9
+    return float(np.sum(gex))
+
+
+def _find_zero_crossings(spot_grid: np.ndarray, gex_grid: np.ndarray) -> list[float]:
+    """
+    Find all zero-crossing points (where total GEX flips sign)
+    using linear interpolation between adjacent grid points.
+    """
+    crossings = []
+    for i in range(len(gex_grid) - 1):
+        g1, g2 = gex_grid[i], gex_grid[i + 1]
+        if not np.isfinite(g1) or not np.isfinite(g2):
+            continue
+        if g1 == 0 and i > 0 and np.isfinite(gex_grid[i - 1]) and gex_grid[i - 1] * g2 < 0:
+            crossings.append(float(spot_grid[i]))
+        if (g1 < 0 < g2) or (g2 < 0 < g1):  # avoid product underflow
+            s1, s2 = spot_grid[i], spot_grid[i + 1]
+            denom = g2 - g1
+            if denom != 0:
+                flip = s1 - g1 * (s2 - s1) / denom
+            else:
+                flip = 0.5 * (s1 + s2)
+            crossings.append(float(flip))
+    return crossings
+
+
+def _find_gamma_flip(strikes_data: list, spot: float, r: float = RISK_FREE_RATE) -> Optional[float]:
+    """Closest sampled sign crossing of call-positive/put-negative BSM GEX.
+
+    Fixed IV and OI, searched over 50–150% of spot. No crossing means None,
+    not a boundary estimate. These are model exposures, not dealer positions.
+    """
+    if not strikes_data or not np.isfinite(spot) or spot <= 0:
         return None
 
-    # Aggregate GEX per strike
-    gex_by_strike: dict[float, float] = {}
-    for sg in strikes_data:
-        gex_by_strike[sg.strike] = gex_by_strike.get(sg.strike, 0) + sg.gex_spotgamma
+    # ── 1. Extract option parameters ──────────────────────
+    arr_strikes = []
+    arr_types = []
+    arr_dtes = []
+    arr_ivs = []
+    arr_ois = []
 
-    if not gex_by_strike:
+    for s in strikes_data:
+        is_dict = isinstance(s, dict)
+        k       = s.get("strike")      if is_dict else getattr(s, "strike", None)
+        otype   = s.get("option_type") if is_dict else getattr(s, "option_type", None)
+        dte     = s.get("dte")         if is_dict else getattr(s, "dte", None)
+        iv      = s.get("iv")          if is_dict else getattr(s, "iv", None)
+        oi      = s.get("oi")          if is_dict else getattr(s, "oi", None)
+
+        if any(v is None for v in (k, otype, dte, iv, oi)):
+            continue
+
+        try:
+            k, dte, iv, oi = map(float, (k, dte, iv, oi))
+        except (TypeError, ValueError):
+            continue
+        if not all(np.isfinite(v) for v in (k, dte, iv, oi)) or k <= 0 or dte < 0 or iv <= 0 or oi <= 0 or otype not in ("call", "put"):
+            continue
+        arr_strikes.append(float(k))
+        arr_types.append(1.0 if str(otype).lower() == "call" else -1.0)
+        arr_dtes.append(float(dte))
+        arr_ivs.append(float(iv))
+        arr_ois.append(float(oi))
+
+    if not arr_strikes:
         return None
 
-    sorted_strikes = sorted(gex_by_strike.keys())
-    gex_values     = [gex_by_strike[k] for k in sorted_strikes]
+    strikes_np = np.array(arr_strikes)
+    types_np   = np.array(arr_types)
+    dtes_np    = np.array(arr_dtes)
+    ivs_np     = np.maximum(np.array(arr_ivs), MIN_IV)
+    ois_np     = np.array(arr_ois)
 
-    # Cari zero crossing di antara strikes
-    for i in range(len(gex_values) - 1):
-        g1, g2 = gex_values[i], gex_values[i + 1]
-        if g1 * g2 < 0:  # sign change
-            # Linear interpolation
-            s1, s2 = sorted_strikes[i], sorted_strikes[i + 1]
-            flip = s1 + (s2 - s1) * abs(g1) / (abs(g1) + abs(g2))
-            return round(flip, 2)
+    T_np     = np.maximum(dtes_np, 0.5) / 365.0
+    sqrt_T_np = np.sqrt(T_np)
+
+    # ── 2. Multi-pass grid search (narrow → wide → ultra-wide) ──
+    search_ranges = [
+        (0.85, 1.15, 400),   # Pass 1: ±15% spot, 400 points
+        (0.70, 1.30, 400),   # Pass 2: ±30% spot, 400 points
+        (0.50, 1.50, 500),   # Pass 3: ±50% spot, 500 points
+    ]
+
+    for lo_mult, hi_mult, n_pts in search_ranges:
+        grid = np.linspace(lo_mult * spot, hi_mult * spot, n_pts)
+        gex_vals = np.array([
+            _compute_total_gex_at_spot(
+                S, strikes_np, types_np, T_np, sqrt_T_np, ivs_np, ois_np, r
+            )
+            for S in grid
+        ])
+
+        crossings = _find_zero_crossings(grid, gex_vals)
+        if crossings:
+            # Return the crossing closest to current spot
+            best = min(crossings, key=lambda x: abs(x - spot))
+            return round(best, 2)
 
     return None
 
@@ -625,6 +638,7 @@ def _aggregate_expiry_inventory(
     calls_df: pd.DataFrame,
     puts_df: pd.DataFrame,
     spot: float,
+    r: float = RISK_FREE_RATE,
 ) -> ExpiryInventory:
     """Aggregate semua StrikeGreeks menjadi ExpiryInventory untuk satu bucket."""
 
@@ -646,7 +660,7 @@ def _aggregate_expiry_inventory(
             gross_vanna=0.0,
             gross_charm=0.0,
             gross_vex=0.0,
-            max_pain=spot,
+            max_pain=None,
             gamma_flip=None,
             largest_gex_strike=spot,
             largest_gex_value=0.0,
@@ -673,10 +687,10 @@ def _aggregate_expiry_inventory(
     pcr      = oi_puts / oi_calls if oi_calls > 0 else 0.0
 
     # Max pain
-    max_pain = _calculate_max_pain(calls_df, puts_df, spot)
+    max_pain = _calculate_max_pain(calls_df, puts_df, spot) if len(set(expiry_dates)) == 1 else None
 
     # Gamma flip
-    gamma_flip = _find_gamma_flip(strikes_data, spot)
+    gamma_flip = _find_gamma_flip(strikes_data, spot, r)
 
     # Largest GEX strike
     if strikes_data:
@@ -696,11 +710,13 @@ def _aggregate_expiry_inventory(
             "dte":             s.dte,
             "oi":              s.oi,
             "volume":          s.volume,
+            "mid_price":       s.mid_price,
             "iv":              s.iv,
             "delta":           s.delta,
             "gamma":           s.gamma,
             "theta":           s.theta,
             "vega":            s.vega,
+            "rho":             s.rho,
             "vanna":           s.vanna,
             "charm":           s.charm,
             "gex_spotgamma":   s.gex_spotgamma,
@@ -709,6 +725,7 @@ def _aggregate_expiry_inventory(
             "charm_exp":       s.charm_exp,
             "delta_exp":       s.delta_exp,
             "vega_exp":        s.vega_exp,
+            **s.provenance,
         }
         for s in strikes_data
     ]
@@ -730,7 +747,7 @@ def _aggregate_expiry_inventory(
         gross_vanna=round(gross_vanna,        4),
         gross_charm=round(gross_charm,        4),
         gross_vex=round(gross_vex,            4),
-        max_pain=round(max_pain,              2),
+        max_pain=round(max_pain, 2) if max_pain is not None else None,
         gamma_flip=gamma_flip,
         largest_gex_strike=largest_gex_strike,
         largest_gex_value=round(largest_gex_value, 4),
@@ -763,12 +780,15 @@ def _generate_signals(
     if total_gex > 0.5:
         signals["gex_regime"]   = "POSITIVE_GAMMA"
         signals["gex_desc"]     = "Dealer long gamma → mereka jual saat naik, beli saat turun → volatilitas tertekan"
+        signals["gex_desc_slang"] = "Bandar lagi adem ayem, bro. Setiap harga naik disundul jual, turun diserok beli. Pasar dibikin mager, gerak dikit-dikit doang, gak bakal ada kejutan liar!"
     elif total_gex < -0.5:
         signals["gex_regime"]   = "NEGATIVE_GAMMA"
         signals["gex_desc"]     = "Dealer short gamma → mereka beli saat naik, jual saat turun → volatilitas diamplifikasi"
+        signals["gex_desc_slang"] = "Wah gawat, bandar lagi boncos kejar-kejaran! Harga naik mereka FOMO beli, harga turun mereka panic selling. Volatilitas bakal ngamuk, siap-siap naik turun roller coaster liar!"
     else:
         signals["gex_regime"]   = "NEUTRAL_GAMMA"
         signals["gex_desc"]     = "GEX mendekati nol, tidak ada dominasi jelas dari dealer hedging"
+        signals["gex_desc_slang"] = "Bandar lagi pada ngopi-ngopi doang, gak ada yang ngegas. Arah pasar terserah retail atau angin, gak ada penahan sama sekali!"
 
     # ── Gamma Flip vs Spot ───────────────────────────
     if gamma_flip:
@@ -782,46 +802,58 @@ def _generate_signals(
     if total_vanna > 0.3:
         signals["vanna_signal"] = "BULLISH_VANNA"
         signals["vanna_desc"]   = "Net positive vanna → kalau IV turun, dealer unwind hedge → tekanan beli di spot"
+        signals["vanna_desc_slang"] = "IV (kepanikan) lagi loyo nih. Karena market adem, bandar lepas tameng hedging-an mereka dan malah belanja spot. Angin seger buat buy!"
     elif total_vanna < -0.3:
         signals["vanna_signal"] = "BEARISH_VANNA"
         signals["vanna_desc"]   = "Net negative vanna → kalau IV naik, dealer hedging → tekanan jual di spot"
+        signals["vanna_desc_slang"] = "Kepanikan pasar (IV) lagi nanjak. Bandar parno langsung pasang tameng hedging dan buang barang di pasar spot. Awas longsor, mending tiarap dulu!"
     else:
         signals["vanna_signal"] = "NEUTRAL_VANNA"
         signals["vanna_desc"]   = "Vanna exposure relatif seimbang"
+        signals["vanna_desc_slang"] = "Pasar lagi santai, emosi bandar terkendali gak ada aksi panic buy atau panic sell gara-gara IV."
 
     # ── Charm Signal (relevan menjelang OPEX) ────────
     if abs(total_charm) > 0.2:
         if total_charm > 0:
             signals["charm_signal"] = "CHARM_TAILWIND"
             signals["charm_desc"]   = "Positive charm → delta dealer meningkat seiring waktu → support harga"
+            signals["charm_desc_slang"] = "Waktu berpihak ke kita! Tiap hari delta bandar naik sendiri gara-gara decay waktu. Ada dorongan halus ke atas layaknya angin buritan!"
         else:
             signals["charm_signal"] = "CHARM_HEADWIND"
             signals["charm_desc"]   = "Negative charm → delta dealer berkurang seiring waktu → tekanan ke bawah"
+            signals["charm_desc_slang"] = "Waktu adalah musuh! Tiap hari delta bandar kemakan waktu (decay) ke bawah. Harga bakal berasa berat buat naik, ada tekanan jual halus tapi konsisten!"
     else:
         signals["charm_signal"] = "CHARM_NEUTRAL"
         signals["charm_desc"]   = "Charm minimal"
+        signals["charm_desc_slang"] = "Waktu gak ngaruh apa-apa hari ini, decay waktu gak bikin bandar keringat dingin."
 
     # ── DAI (Directional bias dari dealer) ───────────
     if total_dai > 1000:
         signals["dai_bias"]  = "DEALER_NET_LONG"
         signals["dai_desc"]  = f"Dealer net long {total_dai:.0f} deltas → potensi jual saat rally"
+        signals["dai_desc_slang"] = f"Bandar lagi megang barang kebanyakan ({total_dai:.0f} delta). Kalau harga naik dikit, mereka bakal langsung guyur jualan biar gak keberatan muatan!"
     elif total_dai < -1000:
         signals["dai_bias"]  = "DEALER_NET_SHORT"
         signals["dai_desc"]  = f"Dealer net short {abs(total_dai):.0f} deltas → potensi beli saat turun"
+        signals["dai_desc_slang"] = f"Bandar lagi boncos jualan kosong/short ({abs(total_dai):.0f} delta). Begitu harga turun dikit, mereka bakal serok beli buat nutup lubang short-nya!"
     else:
         signals["dai_bias"]  = "DEALER_BALANCED"
         signals["dai_desc"]  = "Posisi delta dealer relatif balanced"
+        signals["dai_desc_slang"] = "Muatan bandar lagi pas, gak kurang gak lebih. Gak bakal ada aksi guyur massal atau serok brutal dari mereka."
 
     # ── VEX (IV sensitivity) ─────────────────────────
     if total_vex > 500:
         signals["vex_signal"] = "HIGH_VEX"
         signals["vex_desc"]   = "Vega exposure tinggi → market sangat sensitif terhadap perubahan IV"
+        signals["vex_desc_slang"] = "Senggol bacok nih market sama yang namanya IV! Kepanikan naik dikit aja, portofolio bandar bisa langsung kebakaran atau pesta pora!"
     elif total_vex < -500:
         signals["vex_signal"] = "SHORT_VEX"
         signals["vex_desc"]   = "Net short vega → dealer butuh IV turun untuk profit"
+        signals["vex_desc_slang"] = "Bandar lagi berdoa khusyuk biar kepanikan pasar mereda (IV turun) biar mereka bisa cuan lebar. Kalau IV malah lompat, mereka nangis bombay!"
     else:
         signals["vex_signal"] = "MODERATE_VEX"
         signals["vex_desc"]   = "Vega exposure moderat"
+        signals["vex_desc_slang"] = "Biasa aja bro, bandar lagi santai gak terlalu sensitif sama naik turunnya kepanikan pasar (IV)."
 
     # ── 0DTE specific ────────────────────────────────
     if 0 in by_expiry:
@@ -847,6 +879,18 @@ def _generate_signals(
 
         signals["dgci"] = round(dgci, 2)
         signals["dgci_desc"] = f"DGCI Score: {round(dgci, 2)} ({round(gex_component, 1)} GEX/OI, {round(dist_component, 1)} Spot dist)"
+
+        # Slang for DGCI
+        if dgci > 60:
+            signals["dgci_desc_slang"] = f"Skor DGCI mantap jiwa ({round(dgci, 1)})! Tembok pertahanan bandar tebel abis, siap nahan longsoran gimanapun!"
+        elif dgci > 20:
+            signals["dgci_desc_slang"] = f"Skor DGCI aman terkendali ({round(dgci, 1)}). Bandar masih punya bensin buat jaga lapak."
+        elif dgci > -20:
+            signals["dgci_desc_slang"] = f"Skor DGCI biasa aja ({round(dgci, 1)}). Pasar lagi galau, bandar cuma nunggu momen."
+        elif dgci > -60:
+            signals["dgci_desc_slang"] = f"Skor DGCI agak was-was ({round(dgci, 1)}). Bandar mulai ketar-ketir, tameng mereka mulai tipis."
+        else:
+            signals["dgci_desc_slang"] = f"Skor DGCI kritis parah ({round(dgci, 1)})! Bandar lagi capitulation/nyerah, market rawan jebol dan ambyar!"
 
     return signals
 
@@ -879,46 +923,24 @@ class OptionsInventoryEngine:
         self.r         = r
         self.cache_ttl = cache_ttl
 
-        self._ticker_obj     = None
-        self._last_fetch     = 0.0
-        self._cached_spot    = None
-        self._cached_expiries = []
-
-    def _get_ticker(self):
-        """Return cached yfinance Ticker object."""
-        now = time.time()
-        if self._ticker_obj is None or (now - self._last_fetch) > self.cache_ttl:
-            self._ticker_obj      = yf.Ticker(self.ticker)
-            self._last_fetch      = now
-            self._cached_expiries = _get_expiry_dates(self._ticker_obj)
-        return self._ticker_obj
+        self._provider = None
+        self._provenance = {}
 
     def compute(self) -> InventorySnapshot:
-        """
-        Full compute: fetch semua expiry yang relevan, hitung Greeks,
-        aggregate per bucket, generate signals.
-        """
-        ticker_obj = self._get_ticker()
-        spot, spot_src = _fetch_spot_price(ticker_obj, self.ticker)
-        is_live = spot_src in ("realtime", "delayed")
-
-        expiry_dates = self._cached_expiries
-        if not expiry_dates:
-            # Pure synthetic mode
-            expiry_dates = [
-                (date.today() + timedelta(days=d)).strftime("%Y-%m-%d")
-                for d in [0, 1, 7, 14, 30]
-            ]
-            is_live = False
-
-        # ── Group expiries by bucket ──────────────────
-        bucket_map: dict[int, list[str]] = {b: [] for b in EXPIRY_BUCKETS}
-        for exp_str in expiry_dates:
-            dte_val = _dte(exp_str)
-            bucket  = _assign_bucket(dte_val)
+        if self._provider is None:
+            self._provider = AlpacaOptionsProvider()
+        bundle = self._provider.load(self.ticker)
+        spot = bundle['spot']
+        fetched_chains = bundle['chains']
+        self._provenance = bundle['provenance']
+        self._provenance['risk_free_rate'] = self.r
+        asof_date = bundle['asof_date']
+        bucket_map = {b: [] for b in EXPIRY_BUCKETS}
+        for expiry in fetched_chains:
+            dte_value = (date.fromisoformat(expiry) - asof_date).days
+            bucket = _assign_bucket(dte_value)
             if bucket is not None:
-                bucket_map[bucket].append(exp_str)
-
+                bucket_map[bucket].append(expiry)
         # ── Process each bucket ───────────────────────
         by_expiry: dict[int, ExpiryInventory] = {}
         all_strikes_data: list[StrikeGreeks]   = []
@@ -934,16 +956,8 @@ class OptionsInventoryEngine:
             all_puts_df_list  = []
 
             for exp_str in exp_list:
-                dte_val = _dte(exp_str)
-
-                if is_live:
-                    calls_df, puts_df = _fetch_options_chain(ticker_obj, exp_str)
-                else:
-                    calls_df, puts_df = _gen_synthetic_chain(spot, exp_str, dte_val)
-
-                if calls_df.empty and puts_df.empty:
-                    calls_df, puts_df = _gen_synthetic_chain(spot, exp_str, dte_val)
-
+                dte_val = (date.fromisoformat(exp_str) - asof_date).days
+                calls_df, puts_df = fetched_chains[exp_str]
                 all_calls_df_list.append(calls_df)
                 all_puts_df_list.append(puts_df)
 
@@ -965,11 +979,14 @@ class OptionsInventoryEngine:
 
             inv = _aggregate_expiry_inventory(
                 bucket_strikes, exp_list, bucket,
-                combined_calls, combined_puts, spot
+                combined_calls, combined_puts, spot, self.r
             )
             by_expiry[bucket]  = inv
             all_strikes_data.extend(bucket_strikes)
 
+        if not all_strikes_data:
+            raise OptionsDataError("No valid model Greeks after filtering. An empty chain is not zero exposure.")
+        self._provenance["modeled_contracts"] = len(all_strikes_data)
         # ── Total aggregate ───────────────────────────
         total_gex   = sum(v.net_gex_spotgamma for v in by_expiry.values())
         total_vanna = sum(v.net_vanna          for v in by_expiry.values())
@@ -979,7 +996,7 @@ class OptionsInventoryEngine:
         total_gross_gex = sum(v.gross_gex      for v in by_expiry.values())
 
         # Overall gamma flip dari semua strikes
-        gamma_flip = _find_gamma_flip(all_strikes_data, spot)
+        gamma_flip = _find_gamma_flip(all_strikes_data, spot, self.r)
 
         # GEX regime
         gex_regime = (
@@ -995,10 +1012,10 @@ class OptionsInventoryEngine:
         )
 
         return InventorySnapshot(
-            timestamp=datetime.now().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             ticker=self.ticker,
             spot=round(spot, 2),
-            data_source="live" if is_live else "synthetic",
+            data_source="live",
             total_net_gex=round(total_gex,   4),
             total_net_vanna=round(total_vanna, 4),
             total_net_charm=round(total_charm, 4),
@@ -1049,6 +1066,7 @@ class OptionsInventoryEngine:
             "ticker":           snap.ticker,
             "spot":             snap.spot,
             "data_source":      snap.data_source,
+            "provenance":       self._provenance,
             "total_net_gex":    snap.total_net_gex,
             "total_net_vanna":  snap.total_net_vanna,
             "total_net_charm":  snap.total_net_charm,
@@ -1062,9 +1080,103 @@ class OptionsInventoryEngine:
         }
 
 
+
+# ════════════════════════════════════════════════════════
+# SIMULATOR ENGINE
+# ════════════════════════════════════════════════════════
+
+def simulate_greeks_profile(
+    snapshot_dict: dict,
+    spot_shift_pct: float,
+    iv_shift_pct: float,
+    days_forward: int,
+    r: float = RISK_FREE_RATE
+) -> dict:
+    """
+    Simulate options inventory profile with shifted spot, IV, and DTE.
+    Return dictionary expected by the frontend.
+    """
+    orig_spot = snapshot_dict["spot"]
+    new_spot = orig_spot * (1 + spot_shift_pct / 100.0)
+
+    by_expiry = snapshot_dict.get("by_expiry", {})
+    
+    orig_gex_by_strike = {}
+    sim_gex_by_strike = {}
+    
+    total_orig_gex = 0.0
+    total_sim_gex = 0.0
+    
+    class MockStrike:
+        def __init__(self, strike, option_type, dte, iv, oi, gex):
+            self.strike = strike
+            self.option_type = option_type
+            self.dte = dte
+            self.iv = iv
+            self.oi = oi
+            self.gex_spotgamma = gex
+
+    orig_strikes_mock = []
+    sim_strikes_mock = []
+
+    for bucket, inv in by_expiry.items():
+        for s in inv["strikes"]:
+            strike = s["strike"]
+            option_type = s["option_type"]
+            dte = s["dte"]
+            iv = s["iv"]
+            oi = s["oi"]
+            
+            orig_gex = s["gex_spotgamma"]
+            
+            # Record original
+            orig_gex_by_strike[strike] = orig_gex_by_strike.get(strike, 0) + orig_gex
+            total_orig_gex += orig_gex
+            orig_strikes_mock.append(MockStrike(strike, option_type, dte, iv, oi, orig_gex))
+            
+            # Simulate new
+            new_dte = max(0, dte - days_forward)
+            new_T = max(new_dte, 0.5) / 365
+            new_iv = max(MIN_IV, iv * (1 + iv_shift_pct / 100.0))
+            
+            g = bsm_greeks(new_spot, strike, new_T, r, new_iv, option_type)
+            sign = 1.0 if option_type == "call" else -1.0
+            notional = oi * CONTRACT_SIZE
+            sim_gex = sign * g["gamma"] * notional * (new_spot ** 2) / 1e9
+            
+            sim_gex_by_strike[strike] = sim_gex_by_strike.get(strike, 0) + sim_gex
+            total_sim_gex += sim_gex
+            sim_strikes_mock.append(MockStrike(strike, option_type, new_dte, new_iv, oi, sim_gex))
+
+    orig_flip = _find_gamma_flip(orig_strikes_mock, orig_spot, r)
+    sim_flip = _find_gamma_flip(sim_strikes_mock, new_spot, r)
+    
+    all_strikes = sorted(set(orig_gex_by_strike.keys()).union(set(sim_gex_by_strike.keys())))
+    chart_data = []
+    for k in all_strikes:
+        chart_data.append({
+            "strike": k,
+            "orig_gex": round(orig_gex_by_strike.get(k, 0), 4),
+            "sim_gex": round(sim_gex_by_strike.get(k, 0), 4)
+        })
+        
+    return {
+        "timestamp": snapshot_dict.get("timestamp", datetime.now().isoformat()),
+        "ticker": snapshot_dict["ticker"],
+        "orig_spot": round(orig_spot, 2),
+        "new_spot": round(new_spot, 2),
+        "total_orig_gex": round(total_orig_gex, 4),
+        "total_sim_gex": round(total_sim_gex, 4),
+        "orig_gamma_flip": orig_flip,
+        "sim_gamma_flip": sim_flip,
+        "chart_data": chart_data
+    }
+
+
 # ════════════════════════════════════════════════════════
 # STANDALONE TEST
 # ════════════════════════════════════════════════════════
+
 
 if __name__ == "__main__":
     print("=" * 60)
@@ -1078,14 +1190,14 @@ if __name__ == "__main__":
     print(f"Spot       : {result['spot']}")
     print(f"Source     : {result['data_source']}")
     print(f"Timestamp  : {result['timestamp']}")
-    print(f"\n── Aggregate Greeks ──")
+    print(f"\n-- Aggregate Greeks --")
     print(f"Net GEX    : {result['total_net_gex']:.4f}  ({result['gex_regime']})")
     print(f"Gamma Flip : {result['gamma_flip']}")
     print(f"Net Vanna  : {result['total_net_vanna']:.4f}")
     print(f"Net Charm  : {result['total_net_charm']:.4f}")
     print(f"Net DAI    : {result['total_net_dai']:.4f}")
     print(f"Net VEX    : {result['total_net_vex']:.4f}")
-    print(f"\n── By Expiry Bucket ──")
+    print(f"\n-- By Expiry Bucket --")
     for dte, inv in result["by_expiry"].items():
         print(f"\n  {dte}DTE bucket:")
         print(f"    Expiries    : {inv['expiry_dates']}")
@@ -1098,6 +1210,7 @@ if __name__ == "__main__":
         print(f"    Net Charm   : {inv['net_charm']:.4f}")
         print(f"    Net DAI     : {inv['net_dai']:.4f}")
         print(f"    Net VEX     : {inv['net_vex']:.4f}")
-    print(f"\n── Signals ──")
+    print(f"\n-- Signals --")
     for k, v in result["signals"].items():
-        print(f"  {k}: {v}")
+        print(f"  {k}: {str(v).replace('→', '->')}")
+

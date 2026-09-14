@@ -1,7 +1,7 @@
 // app/components/TickerInput.tsx
 "use client";
 
-import { useState, KeyboardEvent, useRef } from "react";
+import { useState, useEffect, KeyboardEvent, useRef } from "react";
 
 const PRESETS = ["^GSPC", "^NDX", "QQQ", "SPY", "NQ=F", "BBRI.JK", "TLKM.JK"];
 
@@ -9,6 +9,8 @@ interface TickerInputProps {
   value:    string;
   onChange: (ticker: string) => void;
   loading?: boolean;
+  presets?: string[];
+  warmOnHover?: boolean;
 }
 
 /** Fire-and-forget: pre-warm Greeks cache in background */
@@ -17,8 +19,9 @@ function warmGreeksCache(ticker: string) {
     .catch(() => {/* ignore */});
 }
 
-export default function TickerInput({ value, onChange, loading }: TickerInputProps) {
+export default function TickerInput({ value, onChange, loading, presets = PRESETS, warmOnHover = false }: TickerInputProps) {
   const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
   const warmedRef = useRef<Set<string>>(new Set());
 
   const submit = () => {
@@ -32,7 +35,7 @@ export default function TickerInput({ value, onChange, loading }: TickerInputPro
 
   const handlePresetHover = (t: string) => {
     // Only warm once per session to avoid spamming
-    if (!warmedRef.current.has(t) && t !== value) {
+    if (warmOnHover && !warmedRef.current.has(t) && t !== value) {
       warmedRef.current.add(t);
       warmGreeksCache(t);
     }
@@ -45,10 +48,12 @@ export default function TickerInput({ value, onChange, loading }: TickerInputPro
         <div className="relative flex-1">
           <input
             type="text"
+            aria-label="Ticker symbol"
+            maxLength={24}
             value={draft}
             onChange={(e) => setDraft(e.target.value.toUpperCase())}
             onKeyDown={onKey}
-            placeholder="^GSPC"
+            placeholder={presets[0] ?? "SPY"}
             className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-4 py-2 font-mono text-sm text-zinc-100
               placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus:ring-1 focus:ring-zinc-500/30
               transition-colors"
@@ -72,7 +77,7 @@ export default function TickerInput({ value, onChange, loading }: TickerInputPro
 
       {/* Preset chips */}
       <div className="flex flex-wrap gap-1.5">
-        {PRESETS.map((t) => (
+        {presets.map((t) => (
           <button
             key={t}
             onClick={() => { setDraft(t); onChange(t); }}

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { GBSResponse, GBSWall, fetchGBS, fmtGex } from "../../lib/greeks";
+import { GBSResponse, GBSWall, fetchGBS, fmtGammaExposure } from "../../lib/greeks";
 import { RefreshCw, ShieldAlert, Zap, TrendingDown, TrendingUp, Info, BarChart3 } from "lucide-react";
 
 interface Props {
@@ -99,7 +99,7 @@ function WallCard({ wall, isNearest }: { wall: GBSWall; isNearest?: boolean }) {
       <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[9px] font-mono text-zinc-500">
         <div>Dist: <span className="text-zinc-300">{wall.dist_pct.toFixed(2)}%</span></div>
         <div>OI: <span className="text-zinc-300">{wall.total_oi.toLocaleString()}</span></div>
-        <div>GEX: <span className={isCall ? "text-red-400" : "text-emerald-400"}>{fmtGex(wall.total_gex)}</span></div>
+        <div>GEX / 1%: <span className={isCall ? "text-red-400" : "text-emerald-400"}>{fmtGammaExposure(wall.total_gex)}</span></div>
         <div>Vanna: <span className="text-zinc-300">{wall.net_vanna.toFixed(2)}</span></div>
       </div>
 

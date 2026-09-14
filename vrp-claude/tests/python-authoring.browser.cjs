@@ -1,0 +1,76 @@
+const { chromium } = require('playwright');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+(async () => {
+  const browser = await chromium.launch({ headless: true, channel: 'chrome' });
+  try {
+    const context = await browser.newContext({ viewport: { width: 1500, height: 1050 }, permissions: ['clipboard-read', 'clipboard-write'] });
+    const page = await context.newPage(); const errors = []; page.on('pageerror', e => errors.push(e.message));
+    await page.addInitScript(() => localStorage.setItem('vrp.chart-studio.v1', JSON.stringify({ version: 1, name: 'Authoring test', instrument: { provider: 'yahoo', symbol: 'SPY', name: 'SPY' }, interval: '1h', drawings: {}, studies: [{ id: 'authoring', name: 'Authoring Lab', code: 'def calculate(ctx)\n    pass', params: {}, enabled: true, auto: false }], watchlist: [], light: false })));
+    const end = Math.floor(Date.now() / 3600000) * 3600;
+    const bars = Array.from({ length: 120 }, (_, i) => ({ time: end - (119 - i) * 3600, open: 100 + i / 10, high: 101 + i / 10, low: 99 + i / 10, close: 100.5 + i / 10, volume: 100 + i }));
+    await page.route('**/api/chart-studio/bars?**', r => r.fulfill({ json: { bars, currency: 'USD', timezone: 'UTC', asOf: Date.now() } }));
+    await page.route('**/api/chart-studio/stream?**', r => r.abort());
+    await page.goto('http://127.0.0.1:3000/terminal', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Open Python Studio' }).click();
+    const code = page.getByLabel('Python code', { exact: true });
+    const write = async text => { await code.click(); await code.press('Control+a'); await page.keyboard.insertText(text); };
+    const check = () => page.getByRole('button', { name: 'Check syntax', exact: true }).click();
+    const run = () => page.getByRole('button', { name: 'Run', exact: true }).click();
+    const problem = async type => page.waitForFunction(type => document.querySelector('.cs-diagnostic-title strong')?.textContent === type, type, { timeout: 120000 });
+    await check(); await problem('SyntaxError');
+    assert.equal(await page.locator('.cm-python-error-line').count(), 1);
+    await page.getByRole('button', { name: /Line 1:/ }).click();
+    assert.match(await page.locator('.cs-console').textContent(), /Ln 1, Col/);
+    await write('def calculate(ctx):\n    df = ctx.data.ohlcv()\n    ctx.plot.line("bad", missing_variable)');
+    assert.equal(await page.locator('.cm-python-error-line').count(), 0);
+    assert.equal(await page.getByRole('button', { name: /Line 1:/ }).isDisabled(), true);
+    await run(); await problem('NameError'); await page.getByRole('button', { name: 'Line 3', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('.cs-console')?.textContent.includes('Ln 3, Col 1')); 
+    await page.getByRole('button', { name: 'Copy for AI' }).click();
+    assert.match(await page.evaluate(() => navigator.clipboard.readText()), /missing_variable/);
+    await write('raise RuntimeError("Validation must not execute this")');
+    await check(); await page.waitForFunction(() => document.querySelector('.cs-console')?.textContent.includes('Syntax valid'));
+    assert.equal(await page.locator('.cs-diagnostic').count(), 0);
+    await write('def calculate(ctx):\n    print("Editor recovered")\n    ctx.plot.line("recovered", ctx.data.ohlcv().close)');
+    assert.match(await page.locator('.cs-console').textContent(), /Check syntax again/);
+    await run(); await page.waitForFunction(() => document.querySelector('.cs-console')?.textContent.includes('Completed in'));
+    assert.equal(await page.locator('.cs-diagnostic').count(), 0);
+    assert.match(await page.locator('.cs-python-logs').textContent(), /Editor recovered/);
+    await write('import not_a_real_chart_package\ndef calculate(ctx):\n    pass');
+    await run(); await problem('ModuleNotFoundError');
+    assert.match(await page.locator('.cs-diagnostic-hint').textContent(), /browser Python/);
+    await page.getByRole('button', { name: 'SDK reference', exact: true }).click();
+    await page.getByLabel('Search SDK reference').fill('ctx.plot.line');
+    assert.equal(await page.locator('.cs-sdk-reference details').count(), 1);
+    await page.locator('.cs-sdk-reference summary').click();
+    assert.match(await page.locator('.cs-sdk-reference').textContent(), /pandas Series/);
+    await page.getByRole('button', { name: 'Close language reference' }).click();
+    await write('ctx.plot.'); await code.press('Control+Space');
+    await page.waitForSelector('.cm-tooltip-autocomplete');
+    assert.match(await page.locator('.cm-tooltip-autocomplete').textContent(), /ctx.plot.line/);
+    await code.press('Escape');
+    await write('def calculate(ctx):\n    while True:\n        pass'); await run();
+    await page.waitForFunction(() => document.querySelector('.cs-console')?.textContent.includes('Computing'));
+    await page.getByRole('button', { name: 'Stop', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('.cs-console')?.textContent.includes('Stopped'));
+    await write('def calculate(ctx):\n    return unknown'); await run(); await problem('NameError');
+    const out = path.join(__dirname, '../../.ua/python-authoring'); fs.mkdirSync(out, { recursive: true });
+    await page.screenshot({ path: path.join(out, 'desktop.png'), fullPage: true });
+    for (const width of [768, 390, 320]) {
+      await page.setViewportSize({ width, height: 1000 });
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'no page overflow at ' + width);
+      assert.ok(await page.getByRole('button', { name: 'Check syntax', exact: true }).isVisible());
+      assert.ok(await page.evaluate(() => {
+        const toolbar = document.querySelector('.cs-editor-toolbar').getBoundingClientRect();
+        const tabs = document.querySelector('.cs-script-tabs').getBoundingClientRect();
+        return toolbar.bottom <= tabs.top + 1 && [...document.querySelectorAll('.cs-editor-actions button')].every(button => button.getBoundingClientRect().bottom <= toolbar.bottom + 1);
+      }), 'toolbar actions do not overlap script tabs at ' + width);
+      const rect = await code.boundingBox(); assert.ok(rect.height >= 60, 'editor remains usable at ' + width);
+      await page.screenshot({ path: path.join(out, width + '.png'), fullPage: true });
+    }
+    assert.deepEqual(errors, []);
+    console.log('PASS real Python syntax-only validation, error locations, stale diagnostics, copy for AI, runtime recovery, imports, SDK search, completions and responsive editor.');
+  } finally { await browser.close(); }
+})().catch(e => { console.error(e); process.exitCode = 1; });

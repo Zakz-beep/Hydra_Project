@@ -175,8 +175,8 @@ function MetaPanel({ result }: { result: CombinedResult }) {
 }
 
 // ── Main Dashboard Component ───────────────────────────────────────────────────
-export default function VolatilityDashboard() {
-  const [tickersInput, setTickersInput] = useState("BBRI.JK");
+export default function VolatilityDashboard({ initialTicker = "BBRI.JK", onTickerChange }: { initialTicker?: string; onTickerChange?: (ticker: string) => void }) {
+  const [tickersInput, setTickersInput] = useState(initialTicker);
   const [period, setPeriod] = useState("2y");
   const [useHar, setUseHar] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -184,12 +184,15 @@ export default function VolatilityDashboard() {
   const [data, setData] = useState<CombinedResult | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("meta");
 
+  useEffect(() => { setTickersInput(initialTicker); setData(null); }, [initialTicker]);
+
   const handleRun = useCallback(async () => {
-    const ticker = tickersInput.trim();
+    const ticker = tickersInput.trim().toUpperCase();
     if (!ticker) {
       setError("Enter a ticker.");
       return;
     }
+    if (onTickerChange && ticker !== initialTicker) { onTickerChange(ticker); return; }
     setLoading(true);
     setError(null);
     try {
@@ -201,7 +204,7 @@ export default function VolatilityDashboard() {
     } finally {
       setLoading(false);
     }
-  }, [tickersInput, period, useHar]);
+  }, [tickersInput, period, useHar, initialTicker, onTickerChange]);
 
   // Debounced auto-run
   useEffect(() => {
@@ -225,6 +228,7 @@ export default function VolatilityDashboard() {
               Ticker
             </label>
             <input
+              aria-label="Volatility ticker"
               type="text"
               value={tickersInput}
               onChange={e => setTickersInput(e.target.value)}

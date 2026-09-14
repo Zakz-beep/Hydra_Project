@@ -21,9 +21,9 @@ warnings.filterwarnings("ignore")
 N_STATES = 3
 SEED = 42
 STATE_NAMES = {
-    0: "Bearish / High-Vol",
-    1: "Sideways / Neutral",
-    2: "Bullish / Low-Vol",
+    0: "Lower mean return",
+    1: "Middle mean return",
+    2: "Higher mean return",
 }
 
 
@@ -35,9 +35,9 @@ def _build_features(returns_series: pd.Series, avg_corr_series: pd.Series) -> tu
       col2 = DCC avg_corr (systemic correlation)
     Returns aligned X array and dates index.
     """
-    log_ret = np.log(
-        (returns_series + 1).clip(lower=0.001)
-    ) if returns_series.abs().max() < 1 else returns_series  # handle both fraction and raw
+    if not np.isfinite(returns_series).all() or (returns_series <= -1).any():
+        raise ValueError('HMM requires finite simple fractional returns greater than -1.')
+    log_ret = np.log1p(returns_series)
 
     rolling_vol = log_ret.rolling(5).std()
     idx = log_ret.index.intersection(rolling_vol.dropna().index)
@@ -101,12 +101,20 @@ def run_hmm_model(
         random_state=SEED,
         tol=1e-4,
     )
-    model.fit(X)
-    hidden_states = model.predict(X)
-    log_likelihood = float(model.score(X))
+    scale = X.std(axis=0)
+    scale[scale < 1e-8] = 1
+    scaled = (X-X.mean(axis=0))/scale
+    model.fit(scaled)
+    hidden_states = model.predict(scaled)
+    if len(np.unique(hidden_states)) < N_STATES:
+        raise ValueError('HMM did not identify three populated regimes; try a longer history.')
+    history = list(model.monitor_.history)
+    if not model.monitor_.converged or len(history)<2 or abs(history[-1]-history[-2])>model.tol:
+        raise ValueError('HMM did not converge.')
+    log_likelihood = float(model.score(scaled))
 
     # Posterior probabilities (soft assignments)
-    state_proba = model.predict_proba(X)   # shape (T, N_STATES)
+    state_proba = model.predict_proba(scaled)   # Full-sample smoothing, not filtered history.
 
     states_labeled, rank = _sort_and_label(model, hidden_states, X)
     tm = model.transmat_
